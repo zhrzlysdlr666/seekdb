@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "task": "MiniVectorDB (2026 OceanBase competition, round 2)",
+  "summary": "Prompt record for implementing a JSONL-stdio SQL + vector database: protocol handshake, statement-atomic transactions, WAL crash recovery, float32 vector semantics and a four-layer verification plan.",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是数据库内核工程师，任务是在 2026 OceanBase 数据库大赛 round-2 中实现 MiniVectorDB。\n硬约束：\n1. 只通过 stdin/stdout 的 JSON Lines 协议与判题器通信，stdout 只能有协议报文。\n2. 只能用 Python 标准库，容器内根文件系统只读，只有 /data 可写。\n3. 禁止预存用例答案，必须真正实现 SQL 执行、事务与持久化。\n4. 每个结论都要有可执行的验证手段，不允许“看起来对”。"
+    },
+    {
+      "role": "user",
+      "content": "题包给了 STDIO_PROTOCOL.md、mysqltest/cases 里 20 个公开用例和 protocol_check 工具。\n我该按什么顺序开工，才不会写到一半推倒重来？"
+    },
+    {
+      "role": "assistant",
+      "content": "先把“能不能被驱动”和“SQL 对不对”彻底分开，顺序是：\n第一步，只实现握手：启动读取 /data、完成恢复、输出 {\"type\":\"ready\"} 并 flush，然后逐行读 execute/shutdown 并回显同一个 id。此时所有 SQL 都可以先返回错误，只要协议帧合法，就能先跑通 handshake-only。\n第二步，把 20 个用例当规格读一遍，列一张验收矩阵：协议（ready/id/flush/退出码）、DDL（CREATE TABLE/CREATE VECTOR INDEX/ALTER 必须报错）、DML（INSERT 多行、UPDATE 多列、DELETE）、查询（列子集、WHERE、ORDER BY、LIMIT、别名）、向量（float32、L2_DISTANCE、平局）、事务（BEGIN/COMMIT/ROLLBACK、语句原子性）、持久化（重启、强杀、关闭回滚）。\n第三步，按“协议 → 存储 → SQL → 事务 → 向量”实现，每完成一层就复跑对应用例组。\n这样任何一层出问题，失败范围都被限制在这一层，不会污染别的层。"
+    },
+    {
+      "role": "user",
+      "content": "握手这一步为什么这么容易挂？我第一版直接 print('READY') 就报 invalid JSON response。"
+    },
+    {
+      "role": "assistant",
+      "content": "因为判题器的读取是“严格一行一个 JSON 对象”，任何非协议内容都会被当成响应解析。常见死法：\n- stdout 打出 READY、提示符、空行、进度条；\n- 用 print 后没 flush，判题器等到 startup_timeout 才报超时；\n- 启动日志写到了 stdout 而不是 stderr；\n- 用 json.dumps 默认 allow_nan=True，输出 NaN 被判为非法 JSON。\n正确的做法是把协议输出集中到一个 emit() 里：bytes 写 stdout、立即 flush、ensure_ascii=False 保留中文、allow_nan=False 禁止非有限数；其余所有诊断一律走 stderr。\n还有一个隐蔽点：shutdown 之后必须干净退出（exit 0），不能再输出任何字节，否则报 extra stdout or nonzero exit after shutdown。"
+    },
+    {
+      "role": "user",
+      "content": "事务和“语句原子性”怎么设计才既能回滚整条语句，又能保留同一事务里之前成功的语句？"
+    },
+    {
+      "role": "assistant",
+      "content": "用语句级 undo journal，而不是语句级快照拷贝：\n- 每条语句开始前记下 undo 长度 mark；\n- 修改行之前先记一条 undo (表, 主键, 修改前的行或 None)；\n- 语句抛错时，从 mark 之后逆序恢复，只撤销这条语句的改动；\n- 事务整体 ROLLBACK 时，从尾部逆序恢复全部 undo；\n- COMMIT 时把本事务产生的变更按“最终状态”合成 put/remove 操作，一次性 append 到 WAL 并 fsync，然后才回 ok:true。\n这样 transaction_failed_insert 那种场景自然正确：前面 UPDATE 的改动留在事务里，失败的多行 INSERT 整条撤销（包括其中本来合法的那一行），后续 COMMIT 仍然提交前面的 UPDATE。\n另外注意 affected_rows 要与实际匹配的行数一致，且失败语句要返回稳定错误码。"
+    },
+    {
+      "role": "user",
+      "content": "崩溃恢复要做到什么程度？题目说“恢复途中再次退出仍能恢复”。"
+    },
+    {
+      "role": "assistant",
+      "content": "关键字是“只认完整且已 fsync 的行”：\n- WAL 是 append-only JSONL，每行一个已提交事务；append 之后立刻 flush + os.fsync，再回响应；\n- 恢复时逐行解析，遇到解析失败或没有换行结尾的残行就停止，并把文件截断到最后一个完整行的末尾，这样下次启动不会被同一段残行反复卡住；\n- 全量快照用“临时文件 + fsync + os.replace”原子替换，然后再清空 WAL，避免半截快照；\n- 恢复过程本身是纯读 WAL + 幂等重放，因此恢复到一半被再次 kill，下次启动重放同一批记录结果不变。\n验证方式必须是真杀进程（SIGKILL），不能用 shutdown，否则测不出“提交先于落盘”这类 bug。"
+    },
+    {
+      "role": "user",
+      "content": "向量这块有哪些坑？为什么 16777217 和 16777216 的距离会是 0？"
+    },
+    {
+      "role": "assistant",
+      "content": "因为参考实现按 float32 存储。16777217 超出了 float32 的整数精确表示范围（2^24），量化后就是 16777216，所以两行到 [16777216,0] 的距离都是 0.0。实现要点：\n- 写入时用 struct.pack('<f', x) 再 unpack 回来，得到的就是 float32 语义；\n- 量化前后都要检查：NaN、±Infinity、|x| > 3.4028235e38（float32 溢出）一律拒绝，给稳定错误码；\n- 维度必须与列声明的 VECTOR(n) 一致，不一致报维度错误，且整条语句不生效；\n- L2_DISTANCE 返回欧氏距离本身（[3,4] 到 [0,0] 是 5），不是平方；\n- 排序平局不能用插入顺序：题目要求并列时按主键升序，而稳定排序的 tie-breaker 要先按主键排，再从最后一个 ORDER BY 列往前做稳定排序。"
+    },
+    {
+      "role": "user",
+      "content": "SQL 解析要做到多细？隐藏用例会不会用到我没实现的语法？"
+    },
+    {
+      "role": "assistant",
+      "content": "按“公开用例给出形状，正式要求给出边界”来设计：\n- 解析器写成 tokenizer + 递归下降，覆盖 SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/BEGIN/COMMIT/ROLLBACK，表达式支持比较、AND/OR/NOT、IN、LIKE、IS NULL、括号、算术、函数调用；\n- 明确不支持的对象（ALTER、JOIN、子查询、复合主键）统一返回 unsupported_sql，而不是抛内部异常——用例里 ALTER TABLE 就是期望这个错误码；\n- ORDER BY 要能引用 SELECT 别名（如 ORDER BY distance），也要能引用未投影的列；\n- BIGINT 全程用 Python int，禁止经过 float，否则 9007199254740993 会掉精度；\n- 字符串长度按字符数校验，VARCHAR(16) 存中文不能被字节数误伤；\n- 聚合（COUNT/SUM/AVG/MIN/MAX + GROUP BY）即使公开用例没出现也要实现，属于“基础 SQL”范围。"
+    },
+    {
+      "role": "user",
+      "content": "怎么证明自己真的通过了？公开用例全绿就够了吗？"
+    },
+    {
+      "role": "assistant",
+      "content": "不够，公开用例只覆盖“功能形状”，正式要求还包含崩溃、非法输入和协议时序。我的验证分四层：\n1. 协议层：握手只读 ready、每个请求一个响应、id 类型一致、shutdown 后无多余输出、退出码 0；\n2. 用例层：20 个公开用例逐个跑（我先用等价驱动在非 Linux 上跑，再用官方 protocol_check 复核）；\n3. 崩溃层：提交后 SIGKILL、未提交时 SIGKILL、恢复中再次 SIGKILL，重启后用 SELECT 断言数据；\n4. 非法输入层：NaN、Infinity、float32 溢出、维度不足/超出、非向量文本，逐个断言错误码且无残留行。\n另外，任何“语句失败”都要额外断言一次全表扫描，确认没有部分写入——这是最容易漏、也最容易被判 0 的地方。"
+    },
+    {
+      "role": "user",
+      "content": "最后交付要交什么？"
+    },
+    {
+      "role": "assistant",
+      "content": "同一个 commit 里交三样：\n- 源码 minivectordb.py（单文件、纯标准库，方便镜像极小且可复现）；\n- Dockerfile：默认 CMD 直接启动协议进程，不进入 shell、不开端口，设置 PYTHONDONTWRITEBYTECODE 以适配只读根文件系统；\n- conversation.json：这份 Agent Prompt 学习材料，记录从协议到持久化的决策与验证路径。\n提测时填完整的 40 位 commit SHA，分支用 2026-competition-round2。"
+    }
+  ]
+}
