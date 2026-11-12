@@ -2,7 +2,7 @@
   "version": 3,
   "task": "MiniVectorDB — 2026 OceanBase 数据库大赛 round 2（题目 600081）",
   "material_summary": {
-    "scope": "对应参赛版本 commit a3f2c19（分支 2026-competition-round2）。覆盖三段过程：平台判 0 分、3 个用例失败（ec9c00b4 / f02753f / 57df57c）→ 首次通过功能准入（93c52d0f，任务 47251198）→ 本轮查询路径重写与离线 numpy（本提交）。",
+    "scope": "对应参赛版本：分支 2026-competition-round2 上本文件所在的那次提交（2026-11-12，查询路径重写版）。覆盖三段过程：平台判 0 分、3 个用例失败（ec9c00b4 / f02753f / 57df57c）→ 首次通过功能准入（93c52d0f，任务 47251198）→ 本轮查询路径重写与离线 numpy（本次提交）。",
     "provenance": "experiments[*].result_output 全部是本机实际运行输出或平台提测记录的原文，数值未改写。标注「会话早期实测」的两条来自当时终端输出、未另存日志，其余均可按 command 复跑。",
     "division_of_labor": "学生负责目标设定、验收顺序、环境与风险约束、以及在结果出来后的取舍确认；技术方案设计、编码与实验执行由 agent 完成。本材料不把 agent 的规划或解释算作学生理解，每条记录用 attribution 字段标注归属；/evidence_index 逐维度列出学生侧可用证据，没有证据的维度直接写明「无」，不拿 agent 的内容顶替。",
     "what_is_verbatim": "user_prompts 中 content_type=verbatim 的五条为原始消息逐字文本（含错别字与口语）；p1 是开局交接长文的要点复述，已标注 paraphrase，未增删要求。",
