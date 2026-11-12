@@ -43,7 +43,88 @@ int ObFTDictHub::init()
 int ObFTDictHub::destroy()
 {
   int ret = OB_SUCCESS;
+  {
+    lib::ObMutexGuard guard(shared_dict_mutex_);
+    for (int64_t i = 0; i < MAX_SHARED_DICT_CNT; ++i) {
+      if (OB_NOT_NULL(shared_dicts_[i])) {
+        ATOMIC_STORE(&shared_dicts_[i], nullptr);
+      }
+      if (OB_NOT_NULL(shared_containers_[i])) {
+        OB_DELETEx(ObFTCacheRangeContainer, &shared_dict_alloc_, shared_containers_[i]);
+        shared_containers_[i] = nullptr;
+      }
+    }
+    shared_dict_alloc_.reset();
+  }
   is_inited_ = false;
+  return ret;
+}
+
+int ObFTDictHub::get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  dict = nullptr;
+  const int64_t idx = static_cast<int64_t>(desc.type_);
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_UNLIKELY(idx <= 0 || idx >= MAX_SHARED_DICT_CNT)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid dict type for shared dict", K(ret), K(idx), K(desc.type_));
+  } else if (OB_NOT_NULL(dict = ATOMIC_LOAD(&shared_dicts_[idx]))) {
+    // fast path: the shared dict is already built and published.
+  } else {
+    lib::ObMutexGuard guard(shared_dict_mutex_);
+    if (OB_NOT_NULL(dict = ATOMIC_LOAD(&shared_dicts_[idx]))) {
+      // built by another thread while waiting for the mutex.
+    } else if (OB_FAIL(build_shared_dict(desc, dict))) {
+      LOG_WARN("failed to build shared dict", K(ret), K(desc.type_));
+    }
+  }
+  return ret;
+}
+
+int ObFTDictHub::build_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  ObFTCacheRangeContainer *container = nullptr;
+  ObIFTDict *new_dict = nullptr;
+  const int64_t idx = static_cast<int64_t>(desc.type_);
+
+  if (OB_ISNULL(container = OB_NEWx(ObFTCacheRangeContainer, &shared_dict_alloc_, shared_dict_alloc_))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (OB_FAIL(load_cache(desc, *container))) {
+    if (OB_ENTRY_NOT_EXIST != ret) {
+      LOG_WARN("failed to load dict cache", K(ret), K(desc.type_));
+    } else {
+      ret = OB_SUCCESS;
+      if (OB_FAIL(build_cache(desc, *container))) {
+        LOG_WARN("failed to build dict cache", K(ret), K(desc.type_));
+      }
+    }
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(new_dict = OB_NEWx(ObFTRangeDict, &shared_dict_alloc_, shared_dict_alloc_, container, desc))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (OB_FAIL(new_dict->init())) {
+    LOG_WARN("failed to init range dict", K(ret), K(desc.type_));
+  } else {
+    // publish only after the dict is fully initialized; readers use ATOMIC_LOAD.
+    shared_containers_[idx] = container;
+    ATOMIC_STORE(&shared_dicts_[idx], new_dict);
+    dict = new_dict;
+  }
+
+  if (OB_FAIL(ret)) {
+    if (OB_NOT_NULL(new_dict)) {
+      OB_DELETEx(ObIFTDict, &shared_dict_alloc_, new_dict);
+      new_dict = nullptr;
+    }
+    if (OB_NOT_NULL(container)) {
+      OB_DELETEx(ObFTCacheRangeContainer, &shared_dict_alloc_, container);
+      container = nullptr;
+    }
+  }
   return ret;
 }
 int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container)

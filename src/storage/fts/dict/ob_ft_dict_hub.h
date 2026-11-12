@@ -19,6 +19,9 @@
 
 #include "lib/charset/ob_charset.h"
 #include "lib/lock/ob_bucket_lock.h"
+#include "lib/lock/ob_mutex.h"
+#include "lib/allocator/page_arena.h"
+#include "storage/fts/dict/ob_ft_dict.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 
 namespace oceanbase
@@ -96,7 +99,14 @@ class ObFTCacheRangeContainer;
 class ObFTDictHub
 {
 public:
-  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_() {}
+  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_(), shared_dict_mutex_(),
+    shared_dict_alloc_(lib::ObMemAttr("FTSharedDict"))
+  {
+    for (int64_t i = 0; i < MAX_SHARED_DICT_CNT; ++i) {
+      shared_dicts_[i] = nullptr;
+      shared_containers_[i] = nullptr;
+    }
+  }
   ~ObFTDictHub() {}
 
   int init();
@@ -107,17 +117,35 @@ public:
 
   int load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
 
+  /**
+   * Get a process wide shared immutable dict of the given builtin dict type.
+   * The dict (including its range container) is built lazily once per process and
+   * borrowed by all parsers afterwards, which avoids loading dictionary ranges and
+   * rebuilding the range dict on every TOKENIZE call / every indexed document.
+   * The returned dict is read only after published and must NOT be destroyed by callers.
+   */
+  int get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict);
+
 private:
   int get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info);
 
   int put_dict_info(const ObFTDictInfoKey &key, const ObFTDictInfo &info);
 
+  int build_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict);
+
+private:
+  static constexpr int64_t MAX_SHARED_DICT_CNT = 8;
 
 private:
   bool is_inited_;
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;
+
+  lib::ObMutex shared_dict_mutex_;                    // guard shared dict building
+  ObIFTDict *shared_dicts_[MAX_SHARED_DICT_CNT];      // indexed by ObFTDictType
+  ObFTCacheRangeContainer *shared_containers_[MAX_SHARED_DICT_CNT];
+  common::ObArenaAllocator shared_dict_alloc_;
 };
 
 } //  namespace storage

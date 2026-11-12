@@ -134,11 +134,10 @@ int ObIKFTParser::process_one_char(TokenizeContext &ctx,
                                    const ObFTCharUtil::CharType type)
 {
   int ret = OB_SUCCESS;
-  // proces by char with all segmenters
-  for (ObList<ObIIKProcessor *, ObIAllocator>::iterator iter = segmenters_.begin();
-       OB_SUCC(ret) && iter != segmenters_.end();
-       iter++) {
-    if (OB_FAIL((*iter)->process(ctx))) {
+  // process by char with all segmenters; iterate the fixed size array to avoid
+  // the ObList iterator overhead on this per character hot path.
+  for (int64_t i = 0; OB_SUCC(ret) && i < segmenter_cnt_; ++i) {
+    if (OB_FAIL(seg_arr_[i]->process(ctx))) {
     }
   }
   return ret;
@@ -231,13 +230,14 @@ int ObIKFTParserDesc::get_add_word_flag(ObAddWordFlag &flag) const
 int ObIKFTParser::init_dict(const ObFTParserParam &param)
 {
   int ret = OB_SUCCESS;
-  ObIFTDict *tmp_dict = nullptr;
+  UNUSED(param);
 
   if (OB_ISNULL(hub_)) {
     ret = OB_ERR_UNEXPECTED;
   }
 
   ObFTRangeDict *dict = nullptr;
+  UNUSED(dict);
   ObFTDictDesc main_dict_desc("main_dict",
                               ObFTDictType::DICT_IK_MAIN,
                               ObCharsetType::CHARSET_UTF8MB4,
@@ -253,35 +253,16 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
                                   ObCharsetType::CHARSET_UTF8MB4,
                                   ObCollationType::CS_TYPE_UTF8MB4_BIN);
 
-  if (should_read_newest_table()) {
-    // clear dict cache, always false now
-  } else {
-    if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
-    } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
-    }
-  }
-
+  // The IK dictionaries are immutable built-ins, so all parsers share the process
+  // wide instances instead of reloading ranges and rebuilding the range dict on
+  // every TOKENIZE call / every indexed document. The dicts are owned by the hub
+  // and must not be freed by this parser (see reset()).
   if (OB_FAIL(ret)) {
-    // already logged.
-  } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
-  } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
+  } else if (OB_FAIL(hub_->get_shared_dict(main_dict_desc, dict_main_))) {
+  } else if (OB_FAIL(hub_->get_shared_dict(quan_dict_desc, dict_quan_))) {
+  } else if (OB_FAIL(hub_->get_shared_dict(stopword_dict_desc, dict_stop_))) {
   }
 
-  return ret;
-}
-
-int ObIKFTParser::init_single_dict(ObFTDictDesc desc, ObFTCacheRangeContainer &container)
-{
-  int ret = OB_SUCCESS;
-  if (OB_FAIL(hub_->load_cache(desc, container))) {
-    if (OB_ENTRY_NOT_EXIST == ret) {
-      if (OB_FAIL(hub_->build_cache(desc, container))) {
-      }
-    } else {
-    }
-  }
   return ret;
 }
 
@@ -337,6 +318,13 @@ int ObIKFTParser::init_segmenter(const ObFTParserParam &param)
   } else if (OB_FALSE_IT(surrogate_seg = nullptr)) {
   }
   // push back by order, quantifier is before cjk
+  if (OB_SUCC(ret)) {
+    // mirror the owners into the fixed size array used by the per character loop
+    segmenter_cnt_ = 0;
+    for (ObIIKProcessor *segmenter : segmenters_) {
+      seg_arr_[segmenter_cnt_++] = segmenter;
+    }
+  }
 
   if (OB_FAIL(ret)) {
     OB_DELETEx(ObIKLetterProcessor, &allocator_, letter_seg);
@@ -352,6 +340,7 @@ void ObIKFTParser::reset()
   if (!OB_ISNULL(ctx_)) {
     ctx_->~TokenizeContext();
     allocator_.free(ctx_);
+    ctx_ = nullptr;
   }
 
   for (ObIIKProcessor *segmenter : segmenters_) {
@@ -361,43 +350,18 @@ void ObIKFTParser::reset()
     }
   }
   segmenters_.clear();
+  for (int64_t i = 0; i < SEGMENTER_COUNT; ++i) {
+    seg_arr_[i] = nullptr;
+  }
+  segmenter_cnt_ = 0;
 
-  cache_main_.reset();
-  cache_quan_.reset();
-  cache_stop_.reset();
-
-  if (!OB_ISNULL(dict_main_)) {
-    dict_main_->~ObIFTDict();
-    allocator_.free(dict_main_);
-  }
-  if (!OB_ISNULL(dict_quan_)) {
-    dict_quan_->~ObIFTDict();
-    allocator_.free(dict_quan_);
-  }
-  if (!OB_ISNULL(dict_stop_)) {
-    dict_stop_->~ObIFTDict();
-    allocator_.free(dict_stop_);
-  }
+  // The IK dictionaries are process wide shared instances owned by ObFTDictHub,
+  // they must not be destroyed here.
+  dict_main_ = nullptr;
+  dict_quan_ = nullptr;
+  dict_stop_ = nullptr;
 
   is_inited_ = false;
-}
-
-bool ObIKFTParser::should_read_newest_table() const { return false; }
-int ObIKFTParser::build_dict_from_cache(const ObFTDictDesc &desc,
-                                        ObFTCacheRangeContainer &container,
-                                        ObIFTDict *&dict)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(hub_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(dict = OB_NEWx(ObFTRangeDict, &allocator_, allocator_, &container, desc))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(dict->init())) {
-  }
-  if (OB_FAIL(ret)) {
-    OB_DELETEx(ObIFTDict, &allocator_, dict);
-  }
-  return ret;
 }
 
 } //  namespace storage

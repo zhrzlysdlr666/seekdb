@@ -382,18 +382,31 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
-      found = true;
+  // Ranges are built in ascending order of their start words, so binary search
+  // locates the last range whose start word is <= the search word in O(log n)
+  // instead of scanning every range on each dict lookup (once per character).
+  int64_t left = 0;
+  int64_t right = range_dicts_.size() - 1;
+  int64_t candidate = -1;
+  while (OB_SUCC(ret) && left <= right) {
+    const int64_t mid = left + ((right - left) >> 1);
+    const int cmp = ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                      range_dicts_[mid].start_.get_word(),
+                                      single_word);
+    if (cmp <= 0) {
+      candidate = mid;
+      left = mid + 1;
+    } else {
+      right = mid - 1;
     }
+  }
+  if (candidate >= 0
+      && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                           range_dicts_[candidate].end_.get_word(),
+                           single_word)
+             >= 0) {
+    dict = range_dicts_[candidate].dict_;
+    found = true;
   }
   if (!found) {
     // not found, dis match

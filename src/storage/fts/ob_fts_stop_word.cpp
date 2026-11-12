@@ -164,15 +164,54 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    // Most tokens are already lowercase (or contain no cased characters at all,
+    // e.g. CJK). Converting them into a scratch buffer first lets us reuse the
+    // original word when nothing changes, avoiding one allocation and one copy
+    // per token on the tokenize/index-build hot path.
+    const ObString &word = src.get_word().get_string();
+    const int64_t word_len = static_cast<int64_t>(word.length());
+    const ObCollationType coll_type = word_meta_.get_collation_type();
+    const ObCharsetInfo *cs = ObCharset::get_charset(coll_type);
+    char stack_buf[256];
+    char *buf = stack_buf;
+    int64_t buf_len = static_cast<int64_t>(sizeof(stack_buf));
+    char *alloc_buf = nullptr;
+    if (OB_ISNULL(cs)) {
+      ret = OB_INVALID_ARGUMENT;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      const int64_t need = word_len * MAX(static_cast<int64_t>(cs->casedn_multiply), 1);
+      if (need > buf_len) {
+        if (OB_ISNULL(alloc_buf = static_cast<char *>(allocator_.alloc(need)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          buf = alloc_buf;
+          buf_len = need;
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      const size_t out_len = cs->cset->casedn(cs,
+                                              const_cast<char *>(word.ptr()),
+                                              static_cast<size_t>(word_len),
+                                              buf,
+                                              static_cast<size_t>(buf_len));
+      if (static_cast<int64_t>(out_len) == word_len && 0 == MEMCMP(buf, word.ptr(), word_len)) {
+        // unchanged, reuse the source word
+        dst = src;
+      } else {
+        char *dst_buf = nullptr;
+        if (OB_ISNULL(dst_buf = static_cast<char *>(allocator_.alloc(static_cast<int64_t>(out_len))))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          MEMCPY(dst_buf, buf, out_len);
+          ObFTWord tmp(static_cast<int64_t>(out_len), dst_buf, word_meta_);
+          dst = tmp;
+        }
+      }
+    }
+    if (OB_NOT_NULL(alloc_buf)) {
+      allocator_.free(alloc_buf);
+      alloc_buf = nullptr;
     }
   } else {
     dst = src;
