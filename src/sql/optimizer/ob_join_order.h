@@ -1151,6 +1151,15 @@ class Path
       DISALLOW_COPY_AND_ASSIGN(FunctionTablePath);
   };
 
+  class FileScanPath : public FunctionTablePath
+  {
+  public:
+    int get_name_internal(char *buf, const int64_t buf_len, int64_t &pos) const override
+    {
+      return databuff_printf(buf, buf_len, pos, "@file_%lu", table_id_);
+    }
+  };
+
   class JsonTablePath : public Path
   {
   public:

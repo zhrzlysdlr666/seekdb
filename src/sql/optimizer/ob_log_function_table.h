@@ -32,6 +32,7 @@ public:
         table_name_(),
         access_exprs_() { }
   virtual ~ObLogFunctionTable() {}
+  const char *get_name() const override;
   void add_values_expr(ObRawExpr* expr) { value_expr_ = expr; }
   const ObRawExpr* get_value_expr() const { return value_expr_; }
   ObRawExpr* get_value_expr() { return value_expr_; }

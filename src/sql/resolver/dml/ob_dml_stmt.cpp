@@ -181,6 +181,31 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   skip_locked_ = other.skip_locked_;
   node_ = other.node_; // should deep copy ? seems to be unnecessary
   snapshot_query_type_ = other.snapshot_query_type_;
+  is_file_scan_table_ = other.is_file_scan_table_;
+  file_scan_is_glob_ = other.file_scan_is_glob_;
+  file_scan_format_ = other.file_scan_format_;
+  file_scan_delimiter_ = other.file_scan_delimiter_;
+  file_scan_quote_ = other.file_scan_quote_;
+  file_scan_escape_ = other.file_scan_escape_;
+  file_scan_header_ = other.file_scan_header_;
+  file_scan_device_ = other.file_scan_device_;
+  file_scan_inode_ = other.file_scan_inode_;
+  file_scan_size_ = other.file_scan_size_;
+  file_scan_row_count_ = other.file_scan_row_count_;
+  file_scan_mtime_sec_ = other.file_scan_mtime_sec_;
+  file_scan_mtime_nsec_ = other.file_scan_mtime_nsec_;
+  file_scan_ctime_sec_ = other.file_scan_ctime_sec_;
+  file_scan_ctime_nsec_ = other.file_scan_ctime_nsec_;
+  if (OB_SUCC(ret) && is_file_scan_table_ && OB_NOT_NULL(allocator)) {
+    if (OB_FAIL(ob_write_string(*allocator, other.file_scan_path_, file_scan_path_))) {
+    } else if (OB_FAIL(ob_write_string(*allocator, other.file_scan_root_, file_scan_root_))) {
+    } else if (OB_FAIL(ob_write_string(*allocator, other.file_scan_nullstr_, file_scan_nullstr_))) {
+    }
+  } else {
+    file_scan_path_ = other.file_scan_path_;
+    file_scan_root_ = other.file_scan_root_;
+    file_scan_nullstr_ = other.file_scan_nullstr_;
+  }
   // ddl related
   ddl_schema_version_ = other.ddl_schema_version_;
   ddl_table_id_ = other.ddl_table_id_;

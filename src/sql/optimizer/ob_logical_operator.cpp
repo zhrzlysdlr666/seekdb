@@ -3898,7 +3898,12 @@ int ObLogicalOperator::allocate_startup_expr_post(int64_t child_idx)
   if (OB_ISNULL(child)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (is_dml_operator() ||
-            log_op_def::LOG_TEMP_TABLE_INSERT == get_type()) {
+            log_op_def::LOG_TEMP_TABLE_INSERT == get_type() ||
+            (log_op_def::LOG_SELECT_INTO == get_type() && get_stmt() != nullptr
+             && get_stmt()->is_select_stmt()
+             && static_cast<const ObSelectStmt *>(get_stmt())->get_select_into() != nullptr
+             && static_cast<const ObSelectStmt *>(get_stmt())->get_select_into()->is_file_sql_copy_)) {
+    // COPY must execute and publish even when its source produces no rows.
     //do nothing
   } else if (child->get_startup_exprs().empty()) {
     //do nothing

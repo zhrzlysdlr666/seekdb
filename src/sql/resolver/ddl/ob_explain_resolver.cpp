@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_explain_resolver.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
+#include "lib/utility/ob_smart_call.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -26,6 +28,26 @@ const static int64_t EXPLAIN_DISPLAY_OPTION = 1;
 const static int64_t EXPLAIN_INTO_TABLE = 2;
 const static int64_t EXPLAIN_STMT_ID = 3;
 const static int64_t EXPLAIN_CHILD_STMT = 4;
+
+static int has_file_source(const ObDMLStmt &stmt, bool &found)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; !found && i < stmt.get_table_size(); ++i) {
+    const TableItem *table = stmt.get_table_item(i);
+    found = table != nullptr && table->is_file_scan_table_;
+  }
+  ObSEArray<ObSelectStmt *, 8> children;
+  if (!found && OB_FAIL(stmt.get_child_stmts(children))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && !found && i < children.count(); ++i) {
+    if (OB_ISNULL(children.at(i))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(SMART_CALL(has_file_source(*children.at(i), found)))) {
+    }
+  }
+  return ret;
+}
+
 int ObExplainResolver::resolve(const ParseNode &parse_tree)
 {
   int ret = OB_SUCCESS;
@@ -64,6 +86,13 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
         LOG_WARN("failed to generate stmt for child stmt");
       } else {
         explain_stmt->set_explain_query_stmt(static_cast<ObDMLStmt *>(child_stmt));
+        bool file_source = false;
+        if (parse_tree.reserved_ == 1 && child_stmt->is_select_stmt()) {
+          if (OB_FAIL(has_file_source(*static_cast<ObDMLStmt *>(child_stmt), file_source))) {
+          } else {
+            explain_stmt->set_file_describe(file_source);
+          }
+        }
         ParseNode *format = parse_tree.children_[EXPLAIN_FORMAT];
         if (NULL != format) {
           switch (format->type_) {

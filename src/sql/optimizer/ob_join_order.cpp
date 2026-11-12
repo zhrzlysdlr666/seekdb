@@ -5955,7 +5955,8 @@ bool oceanbase::sql::Path::is_cte_path() const
 
 bool oceanbase::sql::Path::is_function_table_path() const
 {
-  return NULL != parent_ && parent_->get_type() == FUNCTION_TABLE_ACCESS;
+  return NULL != parent_ && (parent_->get_type() == FUNCTION_TABLE_ACCESS
+                            || parent_->get_type() == FILE_SCAN_ACCESS);
 }
 
 bool oceanbase::sql::Path::is_json_table_path() const
@@ -6750,6 +6751,10 @@ int FunctionTablePath::estimate_cost()
   int ret = OB_SUCCESS;
   op_cost_ = 1.0;
   cost_ = 1.0;
+  if (parent_ != nullptr && parent_->get_type() == FILE_SCAN_ACCESS) {
+    op_cost_ += std::max(0.0, parent_->get_output_rows()) * 0.01;
+    cost_ = op_cost_;
+  }
   return  ret;
 }
 
@@ -8330,7 +8335,7 @@ int ObJoinOrder::init_base_join_order(const TableItem *table_item)
     } else if (table_item->is_fake_cte_table()) {
       set_type(FAKE_CTE_TABLE_ACCESS);
     } else if (table_item->is_function_table()) {
-      set_type(FUNCTION_TABLE_ACCESS);
+      set_type(table_item->is_file_scan_table_ ? FILE_SCAN_ACCESS : FUNCTION_TABLE_ACCESS);
     } else if (table_item->is_json_table()) {
       set_type(JSON_TABLE_ACCESS);
     } else if (table_item->is_values_table()) {
@@ -8349,7 +8354,7 @@ int ObJoinOrder::generate_base_paths()
   int ret = OB_SUCCESS;
   if (FAKE_CTE_TABLE_ACCESS == get_type()) {
     ret = generate_cte_table_paths();
-  } else if (FUNCTION_TABLE_ACCESS == get_type()) {
+  } else if (FUNCTION_TABLE_ACCESS == get_type() || FILE_SCAN_ACCESS == get_type()) {
     ret = generate_function_table_paths();
   } else if (JSON_TABLE_ACCESS == get_type()) {
     ret = generate_json_table_paths();
@@ -8510,10 +8515,12 @@ int ObJoinOrder::generate_function_table_paths()
              OB_ISNULL(table_item->function_table_expr_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(func_path = reinterpret_cast<FunctionTablePath*>(
-                       allocator_->alloc(sizeof(FunctionTablePath))))) {
+                       allocator_->alloc(table_item->is_file_scan_table_
+                           ? sizeof(FileScanPath) : sizeof(FunctionTablePath))))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
-    func_path = new(func_path) FunctionTablePath();
+    func_path = table_item->is_file_scan_table_
+        ? new(func_path) FileScanPath() : new(func_path) FunctionTablePath();
     func_path->table_id_ = table_id_;
     func_path->parent_ = this;
     ObSEArray<ObExecParamRawExpr *, 4> nl_params;
@@ -8521,6 +8528,11 @@ int ObJoinOrder::generate_function_table_paths()
     // magic number ? todo refine this
     output_rows_ = 199;
     output_row_size_ = 199;
+    if (table_item->is_file_scan_table_ && table_item->file_scan_row_count_ >= 0) {
+      output_rows_ = table_item->file_scan_row_count_;
+      output_row_size_ = output_rows_ > 0
+          ? std::max(8.0, table_item->file_scan_size_ / output_rows_) : 8;
+    }
     func_path->strong_sharding_ = get_plan()->get_optimizer_context().get_match_all_sharding();
     if (OB_FAIL(func_path->set_parallel_info_for_match_all())) {
     } else if (OB_FAIL(ObOptimizerUtil::classify_subquery_exprs(get_restrict_infos(),
@@ -15386,11 +15398,14 @@ int ObJoinOrder::copy_path(const Path& src_path, Path* &dst_path)
   } else if (src_path.is_function_table_path()) {
     const FunctionTablePath &func_path = static_cast<const FunctionTablePath&>(src_path);
     FunctionTablePath *new_func_path = NULL;
-    if (OB_ISNULL(new_func_path = reinterpret_cast<FunctionTablePath*>(allocator_->alloc(sizeof(FunctionTablePath))))) {
+    const bool is_file_scan = func_path.parent_ != nullptr && func_path.parent_->get_type() == FILE_SCAN_ACCESS;
+    if (OB_ISNULL(new_func_path = reinterpret_cast<FunctionTablePath*>(allocator_->alloc(
+            is_file_scan ? sizeof(FileScanPath) : sizeof(FunctionTablePath))))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_ERROR("failed to allocate an FunctionTablePath", K(ret));
     } else {
-      new_func_path = new(new_func_path) FunctionTablePath();
+      new_func_path = is_file_scan ? new(new_func_path) FileScanPath()
+                                  : new(new_func_path) FunctionTablePath();
       if (OB_FAIL(new_func_path->assign(func_path, allocator_))) {
       } else {
         dst_path = new_func_path;

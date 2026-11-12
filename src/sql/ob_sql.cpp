@@ -51,6 +51,40 @@ using namespace pl;
 namespace sql
 {
 
+namespace
+{
+
+bool contains_file_sql_call(const ObString &sql)
+{
+  const char *function_names[] = {"read_csv", "read_json", "read_ndjson", "read_parquet", "glob", "copy"};
+  bool found = false;
+  for (const char *function_name : function_names) {
+  const int64_t function_name_len = strlen(function_name);
+  for (int64_t i = 0; !found && i + function_name_len <= sql.length(); ++i) {
+    bool matches = true;
+    for (int64_t j = 0; matches && j < function_name_len; ++j) {
+      char ch = sql.ptr()[i + j];
+      if (ch >= 'A' && ch <= 'Z') {
+        ch = static_cast<char>(ch - 'A' + 'a');
+      }
+      matches = ch == function_name[j];
+    }
+    const auto identifier_char = [](char ch) {
+      return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+          || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
+    };
+    if (matches && (i == 0 || !identifier_char(sql.ptr()[i - 1]))
+        && (i + function_name_len == sql.length()
+            || !identifier_char(sql.ptr()[i + function_name_len]))) {
+      found = true;
+    }
+  }
+  }
+  return found;
+}
+
+}
+
 const int64_t ObSql::max_error_length = 80;
 const int64_t ObSql::SQL_MEM_SIZE_LIMIT = 1024 * 1024 * 64;
 
@@ -271,18 +305,24 @@ int ObSql::fill_result_set(ObResultSet &result_set,
     }
     case stmt::T_EXPLAIN: {
       ObString tname = ObString::make_string("explain_table");
-      ObString cname = ObString::make_string("Query Plan");
-      field.tname_ = tname;
-      field.org_tname_ = tname;
-      field.cname_ = cname;
-      field.org_cname_ = cname;
-      field.type_.set_type(ObVarcharType);
-      field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
-      field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-      field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
-      field.type_.set_varchar(type_name);
-      if (OB_FAIL(result_set.reserve_field_columns(1))) {
-      } else if (OB_FAIL(result_set.add_field_column(field))) {
+      const bool file_describe = static_cast<const ObExplainStmt &>(basic_stmt).is_file_describe();
+      const char *names[] = {"column_name", "column_type", "null", "key", "default", "extra"};
+      const int64_t column_count = file_describe ? 6 : 1;
+      if (OB_FAIL(result_set.reserve_field_columns(column_count))) {
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
+        ObString cname = ObString::make_string(file_describe ? names[i] : "Query Plan");
+        field.tname_ = tname;
+        field.org_tname_ = tname;
+        field.cname_ = cname;
+        field.org_cname_ = cname;
+        field.type_.set_type(ObVarcharType);
+        field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
+        field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
+        field.type_.set_varchar(type_name);
+        if (OB_FAIL(result_set.add_field_column(field))) {
+        }
       }
       break;
     }
@@ -1196,7 +1236,8 @@ int ObSql::handle_sql_execute(const ObString &sql,
   } else if ((mode == PC_PS_MODE || mode == PC_PL_MODE) && OB_ISNULL(pctx)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    use_plan_cache = session->get_local_ob_enable_plan_cache();
+    // File paths and inferred schemas are fixed during resolution, so these plans cannot be shared.
+    use_plan_cache = session->get_local_ob_enable_plan_cache() && !contains_file_sql_call(sql);
   }
 
   ObPlanCacheCtx pc_ctx(sql, mode, allocator, context, ectx);
@@ -3554,7 +3595,8 @@ OB_NOINLINE int ObSql::handle_physical_plan(const ObString &trimed_stmt,
   bool add_plan_to_pc = false;
   ObSQLSessionInfo &session = result.get_session();
   ObPlanCache *plan_cache = plan_cache_;
-  bool use_plan_cache = session.get_local_ob_enable_plan_cache();
+  bool use_plan_cache = session.get_local_ob_enable_plan_cache()
+                        && !contains_file_sql_call(trimed_stmt);
   // record whether needs to do parameterization at this time,
   // if exact mode is on, not do parameterizaiton
   bool is_enable_transform_tree = !session.get_enable_exact_mode();
