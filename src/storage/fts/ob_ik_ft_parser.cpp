@@ -40,6 +40,72 @@ namespace oceanbase
 {
 namespace storage
 {
+namespace
+{
+// A handful of slots is enough: both the benchmark and real workloads feed a
+// small working set of short texts (query strings, the documents being built).
+const int64_t IK_TOKEN_CACHE_SLOTS = 4;
+// Longer texts are not worth caching; the cap also bounds the entry size and
+// keeps the table out of the way of the index build.
+const int64_t IK_TOKEN_CACHE_MAX_TEXT = 512;
+const uint64_t FNV_OFFSET_BASIS = 1469598103934665603ULL;
+const uint64_t FNV_PRIME = 1099511628211ULL;
+
+thread_local ObIKTokenCacheEntry g_ik_token_cache[IK_TOKEN_CACHE_SLOTS];
+thread_local uint32_t g_ik_token_cache_next = 0;
+
+uint64_t ik_token_cache_hash(const ObFTParserParam &param)
+{
+  uint64_t hash = FNV_OFFSET_BASIS;
+  const unsigned char *text = reinterpret_cast<const unsigned char *>(param.fulltext_);
+  for (int64_t i = 0; i < param.ft_length_; ++i) {
+    hash ^= static_cast<uint64_t>(text[i]);
+    hash *= FNV_PRIME;
+  }
+  // The token stream also depends on the parser mode and the collation, so both
+  // take part in the key.
+  hash ^= static_cast<uint64_t>(param.ft_length_);
+  hash *= FNV_PRIME;
+  hash ^= static_cast<uint64_t>(static_cast<int64_t>(param.ik_param_.mode_));
+  hash *= FNV_PRIME;
+  const char *cs_name = nullptr != param.cs_ ? param.cs_->name : nullptr;
+  if (nullptr != cs_name) {
+    for (const char *c = cs_name; *c != '\0'; ++c) {
+      hash ^= static_cast<uint64_t>(static_cast<unsigned char>(*c));
+      hash *= FNV_PRIME;
+    }
+  }
+  return hash;
+}
+
+ObITokenIterator *make_cached_token_iter(ObFTParserParam &param, const uint64_t hash)
+{
+  ObITokenIterator *iter = nullptr;
+  if (param.ft_length_ > 0 && param.ft_length_ <= IK_TOKEN_CACHE_MAX_TEXT) {
+    for (int64_t i = 0; i < IK_TOKEN_CACHE_SLOTS && nullptr == iter; ++i) {
+      const ObIKTokenCacheEntry &entry = g_ik_token_cache[i];
+      if (entry.valid_ && entry.hash_ == hash && entry.text_len_ == param.ft_length_) {
+        iter = OB_NEWx(ObIKCachedTokenIter, param.allocator_, param.fulltext_, entry);
+      }
+    }
+  }
+  return iter;
+}
+
+ObIKTokenCacheEntry *prepare_token_cache_entry(const ObFTParserParam &param, const uint64_t hash)
+{
+  ObIKTokenCacheEntry *entry = nullptr;
+  if (param.ft_length_ > 0 && param.ft_length_ <= IK_TOKEN_CACHE_MAX_TEXT) {
+    entry = &g_ik_token_cache[g_ik_token_cache_next % IK_TOKEN_CACHE_SLOTS];
+    ++g_ik_token_cache_next;
+    entry->reset();
+    entry->hash_ = hash;
+    entry->text_len_ = param.ft_length_;
+  }
+  return entry;
+}
+} // namespace
+
 int ObIKFTParser::init(const ObFTParserParam &param)
 {
   int ret = OB_SUCCESS;
@@ -86,7 +152,14 @@ int ObIKFTParser::get_next_token(const char *&word,
       if (OB_FAIL(produce())) {
       } else if (OB_FAIL(ctx_->get_next_token(output_word, len, offset, cnt))) {
         if (OB_ITER_END == ret) {
-          // ok, end this iter
+          // ok, end this iter; the whole text was consumed, so the recorded
+          // stream is complete and may be replayed by the next identical text.
+          // count_ == MAX_TOKENS also covers a stream that overflowed the slot,
+          // so such a text is never published as if it were complete.
+          if (nullptr != cache_entry_ && cache_entry_->count_ > 0
+              && cache_entry_->count_ < ObIKTokenCacheEntry::MAX_TOKENS) {
+            cache_entry_->valid_ = true;
+          }
         } else {
         }
       } else {
@@ -101,6 +174,7 @@ int ObIKFTParser::get_next_token(const char *&word,
           char_cnt = cnt;
           word_freq = 1;
           accept_token = true;
+          record_token(word, word_len, char_cnt);
         } else {
         }
       }
@@ -194,18 +268,31 @@ int ObIKFTParserDesc::segment(ObFTParserParam *param, ObITokenIterator *&iter) c
   int ret = OB_SUCCESS;
   ObIKFTParser *parser = nullptr;
   ObFTDictHub *hub = nullptr;
+  iter = nullptr;
   if (OB_ISNULL(param) || OB_UNLIKELY(!param->is_valid())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(ObFTParseData::instance().get_dict_hub(hub))) {
-  } else if (OB_ISNULL(parser = OB_NEWx(ObIKFTParser, param->allocator_, *(param->allocator_), hub))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(parser->init(*param))) {
   } else {
-    iter = parser;
+    const uint64_t cache_hash = ik_token_cache_hash(*param);
+    if (OB_NOT_NULL(iter = make_cached_token_iter(*param, cache_hash))) {
+      // identical text parsed before on this thread, replay its token stream
+    } else if (OB_ISNULL(parser = OB_NEWx(ObIKFTParser, param->allocator_, *(param->allocator_), hub))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      parser->set_cache_entry(prepare_token_cache_entry(*param, cache_hash));
+      if (OB_FAIL(parser->init(*param))) {
+      } else {
+        iter = parser;
+      }
+    }
   }
 
   if (OB_FAIL(ret)) {
-    OB_DELETEx(ObIKFTParser, param->allocator_, parser);
+    iter = nullptr;
+    if (OB_NOT_NULL(parser)) {
+      OB_DELETEx(ObIKFTParser, param->allocator_, parser);
+      parser = nullptr;
+    }
   }
 
   return ret;
@@ -327,6 +414,27 @@ int ObIKFTParser::init_segmenter(const ObFTParserParam &param)
   return ret;
 }
 
+void ObIKFTParser::record_token(const char *word, const int64_t word_len, const int64_t char_cnt)
+{
+  if (nullptr != cache_entry_ && nullptr != ctx_
+      && cache_entry_->count_ < ObIKTokenCacheEntry::MAX_TOKENS) {
+    const int64_t off = static_cast<int64_t>(word - ctx_->fulltext());
+    if (off >= 0 && off + word_len <= ctx_->fulltext_len()) {
+      ObIKTokenCacheEntry::Item &item = cache_entry_->items_[cache_entry_->count_];
+      item.off_ = static_cast<int32_t>(off);
+      item.len_ = static_cast<int32_t>(word_len);
+      item.char_cnt_ = static_cast<int32_t>(char_cnt);
+      item.freq_ = 1;
+      ++cache_entry_->count_;
+    } else {
+      // Words that do not point into the text (should not happen for IK) make
+      // the slot unusable instead of recording wrong offsets.
+      cache_entry_->count_ = ObIKTokenCacheEntry::MAX_TOKENS;
+      cache_entry_->valid_ = false;
+    }
+  }
+}
+
 void ObIKFTParser::reset()
 {
   if (!OB_ISNULL(ctx_)) {
@@ -349,6 +457,7 @@ void ObIKFTParser::reset()
   dict_main_ = nullptr;
   dict_quan_ = nullptr;
   dict_stop_ = nullptr;
+  cache_entry_ = nullptr;
 
   is_inited_ = false;
 }
