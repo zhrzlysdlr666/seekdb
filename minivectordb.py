@@ -42,6 +42,10 @@ INT64_MAX = (1 << 63) - 1
 WAL_NAME = "wal.jsonl"
 SNAP_NAME = "snapshot.json"
 CHECKPOINT_BYTES = 16 << 20
+# Below this row count a full scan is cheaper than materialising the buckets.
+EQ_INDEX_MIN_ROWS = 512
+# Differential switch: set to 1 to route filtered scans the slow way.
+NO_EQ_INDEX = os.environ.get("VECTORDB_NO_EQ_INDEX") == "1"
 
 
 # --------------------------------------------------------------------------- #
@@ -1036,6 +1040,7 @@ class Engine:
         # Bumped on every mutation so cached dense vector matrices can go stale.
         self.mutation_version = 0
         self._vec_cache = {}
+        self._eq_cache = {}
 
     # -- lifecycle -------------------------------------------------------- #
     def close(self) -> None:
@@ -1582,13 +1587,37 @@ class Engine:
         else:
             resolved = [(op, self._column_index(table, colname), value)
                         for op, colname, value in residual]
-            selected = []
-            early_stop = order_term is None and limit is not None
-            for key, row in table["rows"].items():
-                if self._passes(row, resolved):
-                    selected.append((key, row))
-                    if early_stop and len(selected) >= limit:
-                        break
+            indexed = None
+            # A leading `col = literal` conjunct can be answered from an
+            # equality bucket instead of a full scan. Only the *first*
+            # conjunct is eligible: `_passes` short-circuits left to right, so
+            # narrowing on a later conjunct would skip the type errors the
+            # scan path raises for earlier ones.
+            if resolved and order_term is not None and not NO_EQ_INDEX:
+                head_op, head_idx, head_val = resolved[0]
+                if head_op == "=" and not isinstance(head_val, bool):
+                    buckets = self._equality_index(table, head_idx)
+                    if buckets is not None:
+                        indexed = buckets.get(head_val, ())
+            if indexed is not None:
+                rest = resolved[1:]
+                rows = table["rows"]
+                selected = []
+                for candidate in indexed:
+                    row = rows.get(candidate)
+                    if row is None:
+                        continue
+                    if rest and not self._passes(row, rest):
+                        continue
+                    selected.append((candidate, row))
+            else:
+                selected = []
+                early_stop = order_term is None and limit is not None
+                for key, row in table["rows"].items():
+                    if self._passes(row, resolved):
+                        selected.append((key, row))
+                        if early_stop and len(selected) >= limit:
+                            break
 
         distance_slot = None
         query_vec = None
@@ -1679,6 +1708,31 @@ class Engine:
                     values.append(json_safe(self._eval(expr, context)))
             out_rows.append(values)
         return {"columns": columns, "rows": out_rows}
+
+    def _equality_index(self, table, column_index):
+        """value -> primary keys, cached until the table mutates.
+
+        Only used to narrow a leading `col = literal` conjunct. Returns None
+        when the column holds unhashable values (vectors) or when building the
+        bucket map would cost more than the scan it replaces.
+        """
+
+        rows = table["rows"]
+        if len(rows) < EQ_INDEX_MIN_ROWS:
+            return None
+        key = id(table)
+        stamp = self.mutation_version
+        entry = self._eq_cache.get(key)
+        if entry is not None and entry[0] == stamp and entry[1] == column_index:
+            return entry[2]
+        buckets = {}
+        try:
+            for pk, row in rows.items():
+                buckets.setdefault(row[column_index], []).append(pk)
+        except TypeError:
+            return None
+        self._eq_cache = {key: (stamp, column_index, buckets)}
+        return buckets
 
     def _vector_matrix(self, table, vector_idx, vector_dim):
         """Dense float32 matrix of one vector column, cached per table revision.

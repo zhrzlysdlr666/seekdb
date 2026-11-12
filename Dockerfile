@@ -14,9 +14,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY minivectordb.py /app/minivectordb.py
 
-# No pip step on purpose: the build must succeed on a judge machine without
-# package-index access. The engine needs only the standard library (it uses
-# numpy when it happens to be importable, and math.dist otherwise).
+# numpy turns the exact TopK scan into a BLAS-shaped loop instead of one Python
+# call per row. The wheel is committed under vendor/ because the build machine
+# has no package index: `--no-index` never touches the network, so this step
+# either installs the pinned wheel or fails immediately. Either way the build
+# succeeds, and the engine falls back to math.dist if the import fails at run
+# time.
+COPY vendor/ /app/vendor/
+RUN pip install --no-cache-dir --no-index --find-links=/app/vendor numpy==2.2.6 \
+    || echo "numpy unavailable; pure-python fallback stays active"
 
 # The judge bind-mounts a writable directory here; creating it keeps the image
 # usable when it is started without a mount (local experiments).
