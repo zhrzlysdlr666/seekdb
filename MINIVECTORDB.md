@@ -12,7 +12,7 @@ docker run -i --rm --network=none --read-only \
   minivectordb < requests.jsonl > stdout.jsonl 2> stderr.log
 ```
 
-- 基础镜像 `python:3.12-slim`，无第三方依赖（纯标准库），构建阶段无需联网装包。
+- 基础镜像 `python:3.12-slim`；构建阶段安装 `numpy==2.2.6`（锁定版本，用于向量化精确 TopK）；numpy 不可用时自动回退纯标准库路径，功能不变。
 - 容器前台运行，`CMD ["python", "-u", "/app/minivectordb.py"]`，不监听任何端口。
 - 数据目录：容器内固定为 `/data`（可用环境变量 `VECTORDB_DATA_DIR` 覆盖，供本地测试）。
 
