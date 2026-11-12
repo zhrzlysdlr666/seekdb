@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/resolver/ddl/ob_ai_column_resolver.h"
 #include "sql/resolver/ob_resolver.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
@@ -164,6 +165,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
   }
 
   if (OB_SUCC(ret)) {
+    bool ai_handled = false;
+    if (OB_FAIL(rewrite_ai_column_statement(params_, parse_tree, stmt, ai_handled)) || ai_handled) return ret;
     params_.resolver_scope_stmt_type_ = parse_tree.type_;
     params_.session_info_->set_stmt_type(
       ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_));

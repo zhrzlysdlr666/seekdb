@@ -15,6 +15,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/resolver/ddl/ob_ai_column_resolver.h"
+#include "sql/engine/basic/ob_file_sql_engine.h"
 #include "config_bridge.h"
 #include "ob_dml_resolver.h"
 #include "sql/resolver/dml/ob_view_table_resolver.h"
@@ -1833,6 +1835,7 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
                                              ObDMLStmt *stmt /* = NULL */)
 {
   int ret = OB_SUCCESS;
+  if ((session_info_ && session_info_->is_inner()) || is_ai_column_retry_resolution()) include_hidden = true;
   ObColumnRefRawExpr *col_expr = NULL;
   ObSchemaGetterGuard *schema_guard = NULL;
   ColumnItem column_item;
@@ -1885,6 +1888,7 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
     } else if (OB_FAIL(get_column_schema(tid, column_name, col_schema, include_hidden))) {
     } else if (OB_ISNULL(col_schema)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (col_schema->is_ai_column() && FALSE_IT(get_stmt()->get_query_ctx()->get_query_hint_for_update().get_global_hint().merge_plan_cache_hint(OB_USE_PLAN_CACHE_NONE))) {
     } else if (OB_FAIL(ObRawExprUtils::build_column_expr(*params_.expr_factory_, *col_schema, session_info_, col_expr))) {
     } else if (OB_FAIL(table_schema->is_unique_key_column(*schema_guard,
                                                           col_schema->get_column_id(),
@@ -2692,6 +2696,10 @@ int ObDMLResolver::resolve_table(const ParseNode &parse_tree,
         } else {
           table_item = root;
         }
+        break;
+      }
+      case T_FILE_TABLE_EXPRESSION: {
+        OZ(resolve_file_table_item(*table_node, table_item));
         break;
       }
       case T_TABLE_COLLECTION_EXPRESSION: {
@@ -5674,6 +5682,7 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
 {
   int ret = OB_SUCCESS;
   is_generated = false;
+  uint64_t ai_column_id = col_expr ? col_expr->get_column_id() : OB_INVALID_ID;
   const TableItem *table_item = NULL;
   const ColumnItem *view_column_item = NULL;
   if (OB_ISNULL(col_expr) || OB_ISNULL(dml_stmt)) {
@@ -5704,8 +5713,21 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_ISNULL(basic_column_item->expr_)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (basic_column_item->expr_->is_generated_column()) {
-      is_generated = true;
+    } else {
+      ai_column_id = basic_column_item->column_id_;
+      is_generated = basic_column_item->expr_->is_generated_column();
+    }
+  }
+  if (OB_SUCC(ret) && session_info_ && session_info_->is_user_session() && !is_ai_column_retry_resolution()
+      && table_item && table_item->is_basic_table()) {
+    const ObTableSchema *schema = nullptr;
+    if (OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, schema))) {
+    } else if (schema) {
+      const auto *column = schema->get_column_schema(ai_column_id);
+      if (column && column->is_ai_column()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "business SQL cannot assign an AI result column");
+      }
     }
   }
   return ret;
@@ -7632,6 +7654,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   CK (OB_NOT_NULL(table_expr = table_item.function_table_expr_));
   OZ (table_expr->deduce_type(session_info_));
   if (OB_FAIL(ret)) { // do nothing ...
+  } else if (is_file_table_expression(table_expr)) {
+    return resolve_file_table_columns(table_item, col_items);
   } else if (!ObResolverUtils::is_expr_can_be_used_in_table_function(*table_expr)) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "access rows from a non-nested table item");
