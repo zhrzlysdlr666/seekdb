@@ -22,13 +22,53 @@ import math
 import os
 import struct
 import sys
+from array import array
 from pathlib import Path
 
-RECOVERY_VERSION = 1
+RECOVERY_VERSION = 2
 FLOAT32_MAX = 3.4028234663852886e38
+INT64_MIN = -(1 << 63)
+INT64_MAX = (1 << 63) - 1
 WAL_NAME = "wal.jsonl"
 SNAP_NAME = "snapshot.json"
 CHECKPOINT_BYTES = 1 << 20
+
+
+# --------------------------------------------------------------------------- #
+# value encoding between memory and disk
+# --------------------------------------------------------------------------- #
+def disk_value(value):
+    """Project an in-memory value into a JSON-serialisable disk value."""
+    if isinstance(value, array) and value.typecode == "f":
+        return value.tolist()
+    return value
+
+
+def disk_row(values):
+    return [disk_value(value) for value in values]
+
+
+def disk_ops(ops):
+    projected = []
+    for op in ops:
+        if op.get("op") == "put":
+            op = dict(op)
+            op["row"] = disk_row(op["row"])
+        projected.append(op)
+    return projected
+
+
+def materialise_row(columns, values):
+    """Rebuild an in-memory row: vector slots become compact float32 arrays."""
+    row = list(values)
+    for index, column in enumerate(columns):
+        if column.get("type") == "VECTOR" and isinstance(row[index], list):
+            row[index] = array("f", (quantise_float32(item) for item in row[index]))
+    return row
+
+
+def in_int64_range(value: int) -> bool:
+    return INT64_MIN <= value <= INT64_MAX
 
 
 # --------------------------------------------------------------------------- #
@@ -77,7 +117,7 @@ def quantise_float32(value):
 def parse_vector_text(text, dim=None):
     """Parse a vector literal such as ``'[3,4]'`` into a float32 tuple."""
 
-    if isinstance(text, (list, tuple)):
+    if isinstance(text, (list, tuple)) or (isinstance(text, array) and text.typecode == "f"):
         raw = list(text)
     else:
         body = str(text).strip()
@@ -96,7 +136,7 @@ def parse_vector_text(text, dim=None):
                     raw.append(float(token))
                 except ValueError:
                     raise fail("invalid_vector", f"vector component {token!r} is not a number") from None
-    values = tuple(quantise_float32(item) for item in raw)
+    values = array("f", (quantise_float32(item) for item in raw))
     if dim is not None and len(values) != dim:
         raise fail("dimension_mismatch", f"expected {dim} dimensions, got {len(values)}")
     return values
@@ -111,6 +151,8 @@ def as_int(value):
 def json_safe(value):
     """Return a JSON-serialisable projection that keeps integers exact."""
 
+    if isinstance(value, array) and value.typecode == "f":
+        return value.tolist()
     if isinstance(value, tuple):
         return [json_safe(item) for item in value]
     if isinstance(value, list):
@@ -593,6 +635,8 @@ class Parser:
                 if offset_token.kind != "number" or not isinstance(offset_token.value, int):
                     raise fail("syntax_error", "OFFSET needs an integer")
                 offset = offset_token.value
+        if group or any(expr != "*" and _has_aggregate(expr) for expr, _ in items):
+            raise fail("unsupported_sql", "aggregation is not supported")
         return ("select", distinct, items, table, where, group, order, limit, offset)
 
     # -- expressions ------------------------------------------------------ #
@@ -723,46 +767,79 @@ class Store:
         self.wal_bytes = self.wal_path.stat().st_size if self.wal_path.exists() else 0
 
     def load(self):
+        """Stream the snapshot and WAL from disk; never hold a whole file in RAM."""
         tables = {}
         seq = 0
         if self.snapshot_path.exists():
             try:
-                payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                payload = None
-            if isinstance(payload, dict):
-                seq = int(payload.get("seq") or 0)
-                for name, body in (payload.get("tables") or {}).items():
-                    tables[name] = {
-                        "columns": body.get("columns") or [],
-                        "rows": [[row[0], list(row[1])] for row in body.get("rows") or []],
-                        "indexes": body.get("indexes") or {},
-                    }
+                seq = self._load_snapshot(tables, seq)
+            except (ValueError, OSError, UnicodeError):
+                tables = {}
+                seq = 0
         if self.wal_path.exists():
             seq = self._replay(tables, seq)
         return tables, seq
 
+    def _load_snapshot(self, tables, seq):
+        with open(self.snapshot_path, "rb") as handle:
+            header_line = handle.readline()
+        header = json.loads(header_line.decode("utf-8"))
+        if not isinstance(header, dict):
+            return seq
+        if header.get("version") == RECOVERY_VERSION:
+            seq = int(header.get("seq") or 0)
+            with open(self.snapshot_path, "rb") as handle:
+                handle.readline()
+                current = None
+                for raw in handle:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line.decode("utf-8"))
+                    if not isinstance(record, dict):
+                        continue
+                    if "t" in record:
+                        current = {
+                            "columns": record.get("columns") or [],
+                            "rows": [],
+                            "indexes": record.get("indexes") or {},
+                        }
+                        tables[record["t"]] = current
+                    elif "r" in record and current is not None:
+                        entry = record["r"]
+                        current["rows"].append([entry[0], list(entry[1])])
+            return seq
+        # legacy single-line JSON snapshot (version 1)
+        if "tables" in header:
+            seq = int(header.get("seq") or 0)
+            for name, body in (header.get("tables") or {}).items():
+                tables[name] = {
+                    "columns": body.get("columns") or [],
+                    "rows": [[row[0], list(row[1])] for row in body.get("rows") or []],
+                    "indexes": body.get("indexes") or {},
+                }
+        return seq
+
     def _replay(self, tables, seq):
-        data = self.wal_path.read_bytes()
-        position = 0
         good_end = 0
-        length = len(data)
-        while position < length:
-            newline = data.find(b"\n", position)
-            if newline < 0:
-                break
-            chunk = data[position:newline]
-            try:
-                record = json.loads(chunk.decode("utf-8"))
-            except (ValueError, UnicodeError):
-                break
-            if not isinstance(record, dict):
-                break
-            self._apply(tables, record)
-            seq = max(seq, int(record.get("seq") or 0))
-            position = newline + 1
-            good_end = position
-        if good_end != length:
+        position = 0
+        with open(self.wal_path, "rb") as handle:
+            while True:
+                raw = handle.readline()
+                if not raw:
+                    break
+                position += len(raw)
+                try:
+                    record = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    break
+                if not isinstance(record, dict):
+                    break
+                self._apply(tables, record)
+                seq = max(seq, int(record.get("seq") or 0))
+                good_end = position
+        size = self.wal_path.stat().st_size
+        if good_end != size:
             # Torn tail from a crash: drop it so new appends stay readable.
             with open(self.wal_path, "r+b") as handle:
                 handle.truncate(good_end)
@@ -802,7 +879,8 @@ class Store:
                 table["rows"] = [entry for entry in table["rows"] if entry[0] != op["pk"]]
 
     def append(self, record) -> None:
-        line = json.dumps(record, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        line = json.dumps({"seq": record["seq"], "ops": disk_ops(record["ops"])},
+                          ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         payload = line.encode("utf-8") + b"\n"
         with open(self.wal_path, "ab") as handle:
             handle.write(payload)
@@ -811,21 +889,23 @@ class Store:
         self.wal_bytes += len(payload)
 
     def write_snapshot(self, tables, seq) -> None:
-        body = {
-            "version": RECOVERY_VERSION,
-            "seq": seq,
-            "tables": {
-                name: {
-                    "columns": table["columns"],
-                    "rows": [[entry[0], list(entry[1])] for entry in table["rows"]],
-                    "indexes": table["indexes"],
-                }
-                for name, table in tables.items()
-            },
-        }
+        """Stream rows to the snapshot one line at a time (bounded memory)."""
         temporary = self.snapshot_path.with_suffix(".json.tmp")
         with open(temporary, "wb") as handle:
-            handle.write(json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+            handle.write(json.dumps(
+                {"version": RECOVERY_VERSION, "seq": seq},
+                ensure_ascii=False, allow_nan=False,
+            ).encode("utf-8") + b"\n")
+            for name, table in tables.items():
+                handle.write(json.dumps(
+                    {"t": name, "columns": table["columns"], "indexes": table["indexes"]},
+                    ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                ).encode("utf-8") + b"\n")
+                for pk, values in table["rows"].items():
+                    handle.write(json.dumps(
+                        {"r": [pk, disk_row(values)]},
+                        ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                    ).encode("utf-8") + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, self.snapshot_path)
@@ -876,14 +956,11 @@ class Engine:
         self.tables = {}
         for name, body in self.raw_tables.items():
             rows = {}
-            order = []
             for pk, values in body["rows"]:
-                rows[pk] = list(values)
-                order.append(pk)
+                rows[pk] = materialise_row(body["columns"], values)
             self.tables[name] = {
                 "columns": body["columns"],
                 "rows": rows,
-                "order": order,
                 "indexes": body["indexes"],
             }
         self.transaction = None
@@ -904,7 +981,7 @@ class Engine:
         tables = {
             name: {
                 "columns": table["columns"],
-                "rows": [[pk, table["rows"][pk]] for pk in table["order"] if pk in table["rows"]],
+                "rows": table["rows"],
                 "indexes": table["indexes"],
             }
             for name, table in self.tables.items()
@@ -947,15 +1024,8 @@ class Engine:
         if table is None:
             return
         if before is None:
-            if pk in table["rows"]:
-                del table["rows"][pk]
-                try:
-                    table["order"].remove(pk)
-                except ValueError:
-                    pass
+            table["rows"].pop(pk, None)
         else:
-            if pk not in table["rows"]:
-                table["order"].append(pk)
             table["rows"][pk] = list(before)
 
     def _autocommit(self) -> None:
@@ -1051,10 +1121,16 @@ class Engine:
             return {}
         if name in self.tables:
             raise fail("table_exists", f"table {name} already exists")
+        vector_columns = [column for column in columns if column["type"] == "VECTOR"]
+        if len(vector_columns) > 1:
+            raise fail("unsupported_sql", "a table supports at most one vector column")
+        for column in columns:
+            if column["primary"] and column["type"] != "BIGINT":
+                raise fail("unsupported_sql", "the primary key must be a BIGINT column")
         primaries = [column for column in columns if column["primary"]]
         if len(primaries) > 1:
             raise fail("unsupported_sql", "composite primary keys are not supported")
-        self.tables[name] = {"columns": columns, "rows": {}, "order": [], "indexes": {}}
+        self.tables[name] = {"columns": columns, "rows": {}, "indexes": {}}
         self._stage({"op": "create_table", "table": name, "columns": columns})
         return {}
 
@@ -1098,16 +1174,20 @@ class Engine:
             if isinstance(value, bool):
                 raise fail("type_mismatch", f"column {label} needs an integer")
             if isinstance(value, int):
-                return value
-            if isinstance(value, float):
+                number = value
+            elif isinstance(value, float):
                 if value != int(value):
                     raise fail("type_mismatch", f"column {label} needs an integer")
-                return int(value)
-            text = str(value).strip()
-            try:
-                return int(text)
-            except ValueError:
-                raise fail("type_mismatch", f"column {label} needs an integer") from None
+                number = int(value)
+            else:
+                text = str(value).strip()
+                try:
+                    number = int(text)
+                except ValueError:
+                    raise fail("type_mismatch", f"column {label} needs an integer") from None
+            if not in_int64_range(number):
+                raise fail("out_of_range", f"column {label} needs a 64-bit integer")
+            return number
         if kind in ("VARCHAR", "CHAR", "TEXT"):
             text = value if isinstance(value, str) else str(value)
             limit = column.get("length")
@@ -1150,15 +1230,13 @@ class Engine:
                 if key in table["rows"]:
                     raise fail("duplicate_key", "duplicate primary key")
             else:
-                key = len(table["order"]) + len(self.tables[table_name]["order"])
+                key = len(table["rows"])
                 while key in table["rows"]:
                     key += 1
             if self.transaction is not None:
                 self.transaction["undo"].append(
                     (table_name, key, table["rows"].get(key))
                 )
-            if key not in table["rows"]:
-                table["order"].append(key)
             table["rows"][key] = values
             self._stage({"op": "put", "table": table_name, "pk": key, "row": values})
         return {"affected_rows": len(prepared)}
@@ -1172,7 +1250,7 @@ class Engine:
             raise fail("syntax_error", "duplicate column in SET list")
         primary = self._primary_index(table)
         affected = 0
-        for key in list(table["order"]):
+        for key in list(table["rows"].keys()):
             row = table["rows"].get(key)
             if row is None:
                 continue
@@ -1183,28 +1261,18 @@ class Engine:
             for index, (_, node) in zip(targets, assignments):
                 new_row[index] = self._coerce(table, index, self._eval(node, context))
             if primary is not None and new_row[primary] != key:
-                replacement = new_row[primary]
-                if replacement in table["rows"] and replacement != key:
-                    raise fail("duplicate_key", "duplicate primary key")
-                if self.transaction is not None:
-                    self.transaction["undo"].append((table_name, key, list(row)))
-                del table["rows"][key]
-                table["order"][table["order"].index(key)] = replacement
-                table["rows"][replacement] = new_row
-                self._stage({"op": "remove", "table": table_name, "pk": key})
-                self._stage({"op": "put", "table": table_name, "pk": replacement, "row": new_row})
-            else:
-                if self.transaction is not None:
-                    self.transaction["undo"].append((table_name, key, list(row)))
-                table["rows"][key] = new_row
-                self._stage({"op": "put", "table": table_name, "pk": key, "row": new_row})
+                raise fail("unsupported_sql", "updating the primary key is not supported")
+            if self.transaction is not None:
+                self.transaction["undo"].append((table_name, key, list(row)))
+            table["rows"][key] = new_row
+            self._stage({"op": "put", "table": table_name, "pk": key, "row": new_row})
             affected += 1
         return {"affected_rows": affected}
 
     def _delete(self, table_name, where):
         table = self._table(table_name)
         affected = 0
-        for key in list(table["order"]):
+        for key in list(table["rows"].keys()):
             row = table["rows"].get(key)
             if row is None:
                 continue
@@ -1212,11 +1280,7 @@ class Engine:
                 continue
             if self.transaction is not None:
                 self.transaction["undo"].append((table_name, key, list(row)))
-            del table["rows"][key]
-            try:
-                table["order"].remove(key)
-            except ValueError:
-                pass
+            table["rows"].pop(key, None)
             self._stage({"op": "remove", "table": table_name, "pk": key})
             affected += 1
         return {"affected_rows": affected}
@@ -1227,19 +1291,12 @@ class Engine:
         table = self._table(table_name) if table_name else None
         source = []
         if table is not None:
-            for key in table["order"]:
-                row = table["rows"].get(key)
-                if row is None:
-                    continue
+            for key, row in table["rows"].items():
                 if where is not None and not self._truthy(self._eval(where, {"row": row, "table": table})):
                     continue
                 source.append({"row": row, "table": table, "pk": key})
         else:
             source.append({"row": [], "table": None, "pk": 0})
-
-        aggregated = any(_has_aggregate(item[0]) for item in items if item[0] != "*")
-        if group or aggregated:
-            return self._select_aggregate(items, source, group, order, limit, offset)
 
         columns = []
         projections = []
@@ -1277,12 +1334,10 @@ class Engine:
             rows = deduped
         if order:
             rows = self._order_rows(rows, alias_map, order, source)
-        total = len(rows)
         if offset:
             rows = rows[offset:]
         if limit is not None:
             rows = rows[:limit]
-        _ = total
         return {"columns": columns, "rows": [[json_safe(value) for value in row] for row in rows]}
 
     def _order_rows(self, rows, alias_map, order, source):
@@ -1304,71 +1359,17 @@ class Engine:
 
     @staticmethod
     def _sort_key(value):
+        # Keep raw ints (no float conversion): BIGINT values beyond 2**53 must
+        # compare exactly.
         if value is None:
-            return (0, 0.0, "")
+            return (0, 0, "")
         if isinstance(value, bool):
-            return (1, float(value), "")
+            return (1, int(value), "")
         if isinstance(value, (int, float)):
-            return (1, float(value), "")
-        if isinstance(value, (list, tuple)):
-            return (2, float(len(value)), "")
-        return (3, 0.0, str(value))
-
-    def _select_aggregate(self, items, source, group, order, limit, offset):
-        buckets = {}
-        if group:
-            for context in source:
-                key = tuple(
-                    self._sort_key(self._eval(expr, context)) for expr in group
-                )
-                buckets.setdefault(key, []).append(context)
-        else:
-            buckets[("__all__",)] = list(source)
-        columns = []
-        for expr, alias in items:
-            columns.append(alias or self._label(expr))
-        rows = []
-        for contexts in buckets.values():
-            rows.append([
-                self._eval_aggregate(expr, contexts) for expr, _ in items
-            ])
-        if order:
-            rows.sort(key=lambda row: self._sort_key(row[0]))
-        if offset:
-            rows = rows[offset:]
-        if limit is not None:
-            rows = rows[:limit]
-        return {"columns": columns, "rows": [[json_safe(value) for value in row] for row in rows]}
-
-    def _eval_aggregate(self, expr, contexts):
-        if _is_aggregate(expr):
-            _, name, arguments = expr
-            if name == "COUNT":
-                if arguments and arguments[0] == ("*", None):
-                    return len(contexts)
-                total = 0
-                for context in contexts:
-                    if self._eval(arguments[0], context) is not None:
-                        total += 1
-                return total
-            values = [
-                self._eval(arguments[0], context)
-                for context in contexts
-                if self._eval(arguments[0], context) is not None
-            ]
-            if not values:
-                return None
-            if name == "SUM":
-                return sum(values)
-            if name == "AVG":
-                return sum(values) / len(values)
-            if name == "MIN":
-                return min(values, key=self._sort_key)
-            if name == "MAX":
-                return max(values, key=self._sort_key)
-        if not contexts:
-            return None
-        return self._eval(expr, contexts[0])
+            return (1, value, "")
+        if isinstance(value, (list, tuple, array)):
+            return (2, len(value), "")
+        return (3, 0, str(value))
 
     @staticmethod
     def _label(expr) -> str:
@@ -1483,7 +1484,7 @@ class Engine:
         return dot / (norm_a * norm_b)
 
     def _as_vector(self, value, dim=None):
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, (list, tuple)) or (isinstance(value, array) and value.typecode == "f"):
             return parse_vector_text(value, dim)
         if isinstance(value, str):
             return parse_vector_text(value, dim)
@@ -1559,16 +1560,20 @@ class Engine:
         if left is None or right is None:
             return None
         if operator == "+":
-            return left + right
-        if operator == "-":
-            return left - right
-        if operator == "*":
-            return left * right
-        if operator == "/":
+            result = left + right
+        elif operator == "-":
+            result = left - right
+        elif operator == "*":
+            result = left * right
+        elif operator == "/":
             if right == 0:
                 raise fail("division_by_zero", "division by zero")
-            return left / right
-        raise fail("unsupported_sql", f"operator {operator} is not supported")
+            result = left / right
+        else:
+            raise fail("unsupported_sql", f"operator {operator} is not supported")
+        if isinstance(result, int) and not in_int64_range(result):
+            raise fail("out_of_range", "BIGINT arithmetic overflow")
+        return result
 
 
 # --------------------------------------------------------------------------- #
