@@ -69,6 +69,14 @@ private:
   share::schema::ObTableParam table_param_;
   storage::ObTableScanParam scan_param_;
   common::ObNewRowIterator *doc_word_iter_;
+  // Scratch rowkey objects for the per-document key range.  build_key_range()
+  // runs once per scanned document, and it used to allocate four ObObj from
+  // allocator_ every time; allocator_ is also scan_param_.allocator_ and is
+  // never reset between documents, so those allocations both cost a malloc per
+  // row and accumulated for the whole scan.  Keeping the four objects as a
+  // member is safe because scan_param_.key_ranges_ is cleared in reuse() before
+  // the objects are rewritten for the next document.
+  common::ObObj key_range_objs_[4];
   ObDocIDType docid_type_;
   bool is_inited_;
 

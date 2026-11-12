@@ -243,11 +243,9 @@ int ObFTDocWordScanIterator::build_key_range(const uint64_t table_id,
   int ret = OB_SUCCESS;
   static int64_t ROWKEY_COLUMN_COUNT = 2;
   common::ObNewRange range;
-  common::ObObj *objs = nullptr;
+  common::ObObj *objs = key_range_objs_;
   if (OB_UNLIKELY(OB_INVALID_ID == table_id)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_ISNULL(objs = OB_NEW_ARRAY(common::ObObj, &allocator_, ROWKEY_COLUMN_COUNT * 2))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
     if (docid_type_ == ObDocIDType::HIDDEN_INC_PK) {
       objs[0].set_uint64(doc_id_datum.get_uint64());
