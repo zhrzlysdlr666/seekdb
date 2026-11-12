@@ -52,6 +52,13 @@ public:
                                  const uint8_t char_len,
                                  CharType &type);
 
+  // Same classification, but taking an already resolved ObCharsetType so the
+  // per-character hot path does not repeat ObCharset::charset_type_by_coll().
+  static int classify_first_char_by_charset(ObCharsetType cs_type,
+                                            const char *input,
+                                            const uint8_t char_len,
+                                            CharType &type);
+
   static int check_cn_number(ObCollationType coll_type,
                              const char *input,
                              const uint8_t char_len,
@@ -483,6 +490,34 @@ inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,
 {
   int ret = OB_SUCCESS;
   ObCharsetType cs_type = ObCharset::charset_type_by_coll(coll_type);
+
+  switch (cs_type) {
+  case CHARSET_UTF8MB4: {
+    ret = do_classify<CHARSET_UTF8MB4>(input, char_len, type);
+    break;
+  }
+  case CHARSET_UTF16: {
+    ret = do_classify<CHARSET_UTF16>(input, char_len, type);
+    break;
+  }
+  case CHARSET_UTF16LE: {
+    ret = do_classify<CHARSET_UTF16LE>(input, char_len, type);
+    break;
+  }
+  default:
+    ret = OB_NOT_SUPPORTED;
+    STORAGE_FTS_LOG(WARN, "Not supported charset type", K(ret), K(cs_type));
+    break;
+  }
+  return ret;
+}
+
+inline int ObFTCharUtil::classify_first_char_by_charset(ObCharsetType cs_type,
+                                                        const char *input,
+                                                        const uint8_t char_len,
+                                                        CharType &type)
+{
+  int ret = OB_SUCCESS;
 
   switch (cs_type) {
   case CHARSET_UTF8MB4: {

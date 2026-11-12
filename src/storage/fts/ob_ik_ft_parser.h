@@ -40,7 +40,6 @@ public:
         coll_type_(ObCollationType::CS_TYPE_INVALID),
         ctx_(nullptr),
         hub_(hub),
-        segmenters_(allocator_),
         segmenter_cnt_(0),
         dict_main_(nullptr),
         dict_quan_(nullptr),
@@ -91,7 +90,9 @@ private:
   ObCollationType coll_type_;
   TokenizeContext *ctx_;
   ObFTDictHub *hub_;
-  ObList<ObIIKProcessor *, ObIAllocator> segmenters_;
+  // The segmenters are owned through this fixed size array.  They used to live
+  // in an ObList and were copied into the array afterwards, so every parser
+  // used to pay four list node allocations just to iterate four pointers.
   ObIIKProcessor *seg_arr_[SEGMENTER_COUNT];
   int64_t segmenter_cnt_;
 

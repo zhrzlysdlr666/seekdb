@@ -36,7 +36,8 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  const char *fulltext,
                                  int64_t fulltext_len,
                                  bool is_smart)
-    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
+    : coll_type_(coll_type), cs_type_(ObCharset::charset_type_by_coll(coll_type)),
+      fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
       next_char_len_(0), handle_size_(0), is_smart_(is_smart), token_list_(allocator),
       result_list_(allocator)
 {
@@ -87,12 +88,43 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
+  const char *cur = fulltext_ + cursor_;
+  const int64_t remain = fulltext_len_ - cursor_;
+  int64_t fast_len = 0;
+  if (CHARSET_UTF8MB4 == cs_type_ && remain > 0) {
+    // For UTF-8 the leading byte already encodes the sequence length, so the
+    // common case needs no mb_wc call at all.  ObCharset::first_valid_char()
+    // resolves the length through the charset function table once per
+    // character, which dominates this loop for CJK text.  Anything that is not
+    // a well formed leading byte, or a sequence that runs past the end of the
+    // text, falls back to the general routine so the behaviour for malformed
+    // input is unchanged.
+    const uint8_t b0 = static_cast<uint8_t>(cur[0]);
+    if (b0 < 0x80) {
+      fast_len = 1;
+    } else if (0xC0 == (b0 & 0xE0)) {
+      fast_len = 2;
+    } else if (0xE0 == (b0 & 0xF0)) {
+      fast_len = 3;
+    } else if (0xF0 == (b0 & 0xF8)) {
+      fast_len = 4;
+    }
+    if (fast_len > remain) {
+      fast_len = 0;
+    }
+  }
+  if (fast_len > 0) {
+    next_char_len_ = fast_len;
+    ret = ObFTCharUtil::classify_first_char_by_charset(cs_type_,
+                                                       cur,
+                                                       static_cast<uint8_t>(fast_len),
+                                                       next_char_type_);
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                 cur,
+                                                 remain,
+                                                 next_char_len_))) {
   } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
-                                                       fulltext_ + cursor_,
+                                                       cur,
                                                        next_char_len_,
                                                        next_char_type_))) {
   }

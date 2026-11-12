@@ -296,6 +296,7 @@ int ObIKFTParser::init_segmenter(const ObFTParserParam &param)
   ObIKQuantifierProcessor *cnqsg = nullptr;
   ObIKCJKProcessor *cjksg = nullptr;
   ObIKSurrogateProcessor *surrogate_seg = nullptr;
+  segmenter_cnt_ = 0;
   if (OB_ISNULL(letter_seg = OB_NEWx(ObIKLetterProcessor, &allocator_))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else if (OB_ISNULL(dict_quan_)) {
@@ -308,24 +309,15 @@ int ObIKFTParser::init_segmenter(const ObFTParserParam &param)
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else if (OB_ISNULL(surrogate_seg = OB_NEWx(ObIKSurrogateProcessor, &allocator_))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(segmenters_.push_back(letter_seg))) {
+  } else if (FALSE_IT(seg_arr_[segmenter_cnt_++] = letter_seg)) {
   } else if (FALSE_IT(letter_seg = nullptr)) {
-  } else if (OB_FAIL(segmenters_.push_back(cnqsg))) {
+  } else if (FALSE_IT(seg_arr_[segmenter_cnt_++] = cnqsg)) {
   } else if (FALSE_IT(cnqsg = nullptr)) {
-  } else if (OB_FAIL(segmenters_.push_back(cjksg))) {
+  } else if (FALSE_IT(seg_arr_[segmenter_cnt_++] = cjksg)) {
   } else if (FALSE_IT(cjksg = nullptr)) {
-  } else if (OB_FAIL(segmenters_.push_back(surrogate_seg))) {
+  } else if (FALSE_IT(seg_arr_[segmenter_cnt_++] = surrogate_seg)) {
   } else if (OB_FALSE_IT(surrogate_seg = nullptr)) {
   }
-  // push back by order, quantifier is before cjk
-  if (OB_SUCC(ret)) {
-    // mirror the owners into the fixed size array used by the per character loop
-    segmenter_cnt_ = 0;
-    for (ObIIKProcessor *segmenter : segmenters_) {
-      seg_arr_[segmenter_cnt_++] = segmenter;
-    }
-  }
-
   if (OB_FAIL(ret)) {
     OB_DELETEx(ObIKLetterProcessor, &allocator_, letter_seg);
     OB_DELETEx(ObIKQuantifierProcessor, &allocator_, cnqsg);
@@ -343,15 +335,12 @@ void ObIKFTParser::reset()
     ctx_ = nullptr;
   }
 
-  for (ObIIKProcessor *segmenter : segmenters_) {
-    if (!OB_ISNULL(segmenter)) {
-      segmenter->~ObIIKProcessor();
-      allocator_.free(segmenter);
-    }
-  }
-  segmenters_.clear();
   for (int64_t i = 0; i < SEGMENTER_COUNT; ++i) {
-    seg_arr_[i] = nullptr;
+    if (!OB_ISNULL(seg_arr_[i])) {
+      seg_arr_[i]->~ObIIKProcessor();
+      allocator_.free(seg_arr_[i]);
+      seg_arr_[i] = nullptr;
+    }
   }
   segmenter_cnt_ = 0;
 
