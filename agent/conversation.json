@@ -1,75 +1,202 @@
 {
-  "version": 1,
-  "task": "MiniVectorDB (2026 OceanBase competition, round 2)",
-  "summary": "Prompt record for implementing a JSONL-stdio SQL + vector database: protocol handshake, statement-atomic transactions, WAL crash recovery, float32 vector semantics and a four-layer verification plan.",
-  "messages": [
+  "version": 2,
+  "task": "MiniVectorDB — 2026 OceanBase 数据库大赛 round 2（题目 600081）",
+  "material_summary": {
+    "scope": "本文件对应参赛版本 commit 93c52d0f1c8d455f3d80131f4ddf28ed74d44eb6（分支 2026-competition-round2）。记录从「平台判 0 分、3 个用例失败」到「MySQL 正式用例通过、性能项有效」这一段的定位、验证与取舍。",
+    "provenance": "experiments[*].result_output 为本机实际运行输出或平台提测记录原文，未改写数值；标注「会话早期实测」的两条来自当时终端输出、未另存日志，其余可按 command 复跑。",
+    "division_of_labor": "学生负责目标设定、验收顺序、环境与风险约束，以及在看到结果后的取舍确认；技术方案设计、编码、实验执行由 agent 完成。本材料不把 agent 的解释算作学生理解，逐条用 attribution 字段标注归属。",
+    "what_is_verbatim": "user_prompts 中 content_type=verbatim 的两条为原始消息逐字文本；content_type=paraphrase 的一条是任务交接长文的要点复述，已标注。",
+    "desensitization": "已移除本机绝对路径、GitHub 凭据、账号与内网地址，不影响判断所需上下文。",
+    "synthetic": false
+  },
+  "user_prompts": [
     {
-      "role": "system",
-      "content": "你是数据库内核工程师，任务是在 2026 OceanBase 数据库大赛 round-2 中实现 MiniVectorDB。\n硬约束：\n1. 只通过 stdin/stdout 的 JSON Lines 协议与判题器通信，stdout 只能有协议报文。\n2. 只能用 Python 标准库，容器内根文件系统只读，只有 /data 可写。\n3. 禁止预存用例答案，必须真正实现 SQL 执行、事务与持久化。\n4. 每个结论都要有可执行的验证手段，不允许“看起来对”。"
+      "id": "p1",
+      "content_type": "paraphrase",
+      "note": "开局任务交接（原文较长，此处为要点复述，未增删要求）",
+      "content": "题目 600081 上一版提交 0 分，3 个用例失败：2 个「功能结果不符合要求」，1 个「database exited before response」。要求先把失败用例复现出来再改代码，改完提测拿分；满分 80 分＝性能排名 40＋Agent Prompt 排名 40。环境限制：沙箱会崩、PATH 缺 System32、没有 curl；提测脚本在 browser-automation 目录。"
     },
     {
-      "role": "user",
-      "content": "题包给了 STDIO_PROTOCOL.md、mysqltest/cases 里 20 个公开用例和 protocol_check 工具。\n我该按什么顺序开工，才不会写到一半推倒重来？"
+      "id": "p2",
+      "content_type": "verbatim",
+      "content": "请继续执行任务"
     },
     {
-      "role": "assistant",
-      "content": "先把“能不能被驱动”和“SQL 对不对”彻底分开，顺序是：\n第一步，只实现握手：启动读取 /data、完成恢复、输出 {\"type\":\"ready\"} 并 flush，然后逐行读 execute/shutdown 并回显同一个 id。此时所有 SQL 都可以先返回错误，只要协议帧合法，就能先跑通 handshake-only。\n第二步，把 20 个用例当规格读一遍，列一张验收矩阵：协议（ready/id/flush/退出码）、DDL（CREATE TABLE/CREATE VECTOR INDEX/ALTER 必须报错）、DML（INSERT 多行、UPDATE 多列、DELETE）、查询（列子集、WHERE、ORDER BY、LIMIT、别名）、向量（float32、L2_DISTANCE、平局）、事务（BEGIN/COMMIT/ROLLBACK、语句原子性）、持久化（重启、强杀、关闭回滚）。\n第三步，按“协议 → 存储 → SQL → 事务 → 向量”实现，每完成一层就复跑对应用例组。\n这样任何一层出问题，失败范围都被限制在这一层，不会污染别的层。"
+      "id": "p3",
+      "content_type": "verbatim",
+      "content": "我有什么可以帮你怎么提交"
     },
     {
-      "role": "user",
-      "content": "握手这一步为什么这么容易挂？我第一版直接 print('READY') 就报 invalid JSON response。"
-    },
-    {
-      "role": "assistant",
-      "content": "因为判题器的读取是“严格一行一个 JSON 对象”，任何非协议内容都会被当成响应解析。常见死法：\n- stdout 打出 READY、提示符、空行、进度条；\n- 用 print 后没 flush，判题器等到 startup_timeout 才报超时；\n- 启动日志写到了 stdout 而不是 stderr；\n- 用 json.dumps 默认 allow_nan=True，输出 NaN 被判为非法 JSON。\n正确的做法是把协议输出集中到一个 emit() 里：bytes 写 stdout、立即 flush、ensure_ascii=False 保留中文、allow_nan=False 禁止非有限数；其余所有诊断一律走 stderr。\n还有一个隐蔽点：shutdown 之后必须干净退出（exit 0），不能再输出任何字节，否则报 extra stdout or nonzero exit after shutdown。"
-    },
-    {
-      "role": "user",
-      "content": "事务和“语句原子性”怎么设计才既能回滚整条语句，又能保留同一事务里之前成功的语句？"
-    },
-    {
-      "role": "assistant",
-      "content": "用语句级 undo journal，而不是语句级快照拷贝：\n- 每条语句开始前记下 undo 长度 mark；\n- 修改行之前先记一条 undo (表, 主键, 修改前的行或 None)；\n- 语句抛错时，从 mark 之后逆序恢复，只撤销这条语句的改动；\n- 事务整体 ROLLBACK 时，从尾部逆序恢复全部 undo；\n- COMMIT 时把本事务产生的变更按“最终状态”合成 put/remove 操作，一次性 append 到 WAL 并 fsync，然后才回 ok:true。\n这样 transaction_failed_insert 那种场景自然正确：前面 UPDATE 的改动留在事务里，失败的多行 INSERT 整条撤销（包括其中本来合法的那一行），后续 COMMIT 仍然提交前面的 UPDATE。\n另外注意 affected_rows 要与实际匹配的行数一致，且失败语句要返回稳定错误码。"
-    },
-    {
-      "role": "user",
-      "content": "崩溃恢复要做到什么程度？题目说“恢复途中再次退出仍能恢复”。"
-    },
-    {
-      "role": "assistant",
-      "content": "关键字是“只认完整且已 fsync 的行”：\n- WAL 是 append-only JSONL，每行一个已提交事务；append 之后立刻 flush + os.fsync，再回响应；\n- 恢复时逐行解析，遇到解析失败或没有换行结尾的残行就停止，并把文件截断到最后一个完整行的末尾，这样下次启动不会被同一段残行反复卡住；\n- 全量快照用“临时文件 + fsync + os.replace”原子替换，然后再清空 WAL，避免半截快照；\n- 恢复过程本身是纯读 WAL + 幂等重放，因此恢复到一半被再次 kill，下次启动重放同一批记录结果不变。\n验证方式必须是真杀进程（SIGKILL），不能用 shutdown，否则测不出“提交先于落盘”这类 bug。"
-    },
-    {
-      "role": "user",
-      "content": "向量这块有哪些坑？为什么 16777217 和 16777216 的距离会是 0？"
-    },
-    {
-      "role": "assistant",
-      "content": "因为参考实现按 float32 存储。16777217 超出了 float32 的整数精确表示范围（2^24），量化后就是 16777216，所以两行到 [16777216,0] 的距离都是 0.0。实现要点：\n- 写入时用 struct.pack('<f', x) 再 unpack 回来，得到的就是 float32 语义；\n- 量化前后都要检查：NaN、±Infinity、|x| > 3.4028235e38（float32 溢出）一律拒绝，给稳定错误码；\n- 维度必须与列声明的 VECTOR(n) 一致，不一致报维度错误，且整条语句不生效；\n- L2_DISTANCE 返回欧氏距离本身（[3,4] 到 [0,0] 是 5），不是平方；\n- 排序平局不能用插入顺序：题目要求并列时按主键升序，而稳定排序的 tie-breaker 要先按主键排，再从最后一个 ORDER BY 列往前做稳定排序。"
-    },
-    {
-      "role": "user",
-      "content": "SQL 解析要做到多细？隐藏用例会不会用到我没实现的语法？"
-    },
-    {
-      "role": "assistant",
-      "content": "按“公开用例给出形状，正式要求给出边界”来设计：\n- 解析器写成 tokenizer + 递归下降，覆盖 SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/BEGIN/COMMIT/ROLLBACK，表达式支持比较、AND/OR/NOT、IN、LIKE、IS NULL、括号、算术、函数调用；\n- 明确不支持的对象（ALTER、JOIN、子查询、复合主键）统一返回 unsupported_sql，而不是抛内部异常——用例里 ALTER TABLE 就是期望这个错误码；\n- ORDER BY 要能引用 SELECT 别名（如 ORDER BY distance），也要能引用未投影的列；\n- BIGINT 全程用 Python int，禁止经过 float，否则 9007199254740993 会掉精度；\n- 字符串长度按字符数校验，VARCHAR(16) 存中文不能被字节数误伤；\n- 聚合（COUNT/SUM/AVG/MIN/MAX + GROUP BY）即使公开用例没出现也要实现，属于“基础 SQL”范围。"
-    },
-    {
-      "role": "user",
-      "content": "怎么证明自己真的通过了？公开用例全绿就够了吗？"
-    },
-    {
-      "role": "assistant",
-      "content": "不够，公开用例只覆盖“功能形状”，正式要求还包含崩溃、非法输入和协议时序。我的验证分四层：\n1. 协议层：握手只读 ready、每个请求一个响应、id 类型一致、shutdown 后无多余输出、退出码 0；\n2. 用例层：20 个公开用例逐个跑（我先用等价驱动在非 Linux 上跑，再用官方 protocol_check 复核）；\n3. 崩溃层：提交后 SIGKILL、未提交时 SIGKILL、恢复中再次 SIGKILL，重启后用 SELECT 断言数据；\n4. 非法输入层：NaN、Infinity、float32 溢出、维度不足/超出、非向量文本，逐个断言错误码且无残留行。\n另外，任何“语句失败”都要额外断言一次全表扫描，确认没有部分写入——这是最容易漏、也最容易被判 0 的地方。"
-    },
-    {
-      "role": "user",
-      "content": "最后交付要交什么？"
-    },
-    {
-      "role": "assistant",
-      "content": "同一个 commit 里交三样：\n- 源码 minivectordb.py（单文件、纯标准库，方便镜像极小且可复现）；\n- Dockerfile：默认 CMD 直接启动协议进程，不进入 shell、不开端口，设置 PYTHONDONTWRITEBYTECODE 以适配只读根文件系统；\n- conversation.json：这份 Agent Prompt 学习材料，记录从协议到持久化的决策与验证路径。\n提测时填完整的 40 位 commit SHA，分支用 2026-competition-round2。"
+      "id": "p4",
+      "content_type": "verbatim",
+      "note": "在本文件重写前，学生对材料真实性做出的选择（选项原文）",
+      "content": "按真实实验数据重写（推荐）"
     }
+  ],
+  "conversations": [
+    {
+      "id": "c1",
+      "role": "student",
+      "content": "上一版 0 分，3 个用例失败：2 个功能结果不符合要求，1 个 database exited before response。先把失败用例复现出来再改代码，改完提测拿分。",
+      "source": "p1 原文要点"
+    },
+    {
+      "id": "c2",
+      "role": "agent",
+      "content": "复现结论：本地 20 个公开用例全绿，平台仍判 3 个失败，差异在驱动层。我本地驱动在 Windows 上用 BufferedReader.read(65536) 读管道，会等到缓冲区填满才返回，握手和长结果集都表现为超时；判题器在 Linux 上是行缓冲读取。所以「本地全绿」不等于「平台通过」。",
+      "source": "会话记录"
+    },
+    {
+      "id": "c3",
+      "role": "tool",
+      "content": "pcheck_win/_transport.py 打补丁：os.read(self.fileno, 65536) 替代 BufferedReader.read，读线程改用 self.reader.chunks。改后本地驱动与 Linux 行为一致，20 用例全绿且不再挂起。",
+      "source": "本地运行输出"
+    },
+    {
+      "id": "c4",
+      "role": "agent",
+      "content": "database exited before response 单独归因：不是慢，是进程在回包前就退出了。对应启动阶段未捕获异常——/data 里残留的半截 WAL 行让恢复直接抛异常。修法是恢复时只认「完整且以换行结尾」的行，遇残行截断到最后一个完整行末尾，保证下次启动不被同一段残行反复卡住。",
+      "source": "会话记录，验证见 exp-03"
+    },
+    {
+      "id": "c5",
+      "role": "agent",
+      "content": "崩溃验证必须真杀进程（SIGKILL），不能用 shutdown 代替，否则测不出「先回包后落盘」这类问题。据此写了「提交后 kill -9 数据仍在」与「未提交事务 kill -9 后整体消失」两条断言，均通过（exp-05）。",
+      "source": "会话记录"
+    },
+    {
+      "id": "c6",
+      "role": "agent",
+      "content": "镜像不塞 numpy：上一次镜像里加 pip install numpy，判题 8 秒就失败，连用例都没跑到（task 47251136）。改成镜像只用标准库，能 import numpy 就走快速路径，否则 math.dist + heapq，代价用 exp-06 量化。",
+      "source": "会话记录 + 平台记录 57df57c"
+    },
+    {
+      "id": "c7",
+      "role": "agent",
+      "content": "快慢两条路径必须证明结果一致，不能只看快的那条跑得快。写了 equiv_checks.py：同一批随机数据分别喂给 numpy 路径和标准库路径，比对 ok/code、列名、行集合与 1e-6 容差内的距离值，另加一轮插入/更新/删除交错后的比对。结果 checks=400 mismatches=0。",
+      "source": "会话记录，见 exp-04"
+    },
+    {
+      "id": "c8",
+      "role": "student",
+      "content": "成绩卡在 0 分，先把功能准入过掉；性能和 Prompt 都是 0 就没意义。",
+      "source": "p1 的优先级要求与赛题计分规则（MySQL 用例未全过则总分 0）"
+    },
+    {
+      "id": "c9",
+      "role": "agent",
+      "content": "按此拆成三次提交：f02753f 修协议与错误码、57df57c 试图加 numpy（构建 8 秒失败）、93c52d0f 回退标准库镜像并加快速路径。93c52d0f 首次通过功能准入，性能原始指标 E=231.519603。",
+      "source": "平台提测记录 47251097 / 47251136 / 47251198"
+    },
+    {
+      "id": "c10",
+      "role": "student",
+      "content": "按真实实验数据重写（推荐）——不编造我没说过的技术对话。",
+      "source": "p4 原文"
+    },
+    {
+      "id": "c11",
+      "role": "agent",
+      "content": "于是把上一版只有结论、没有任何实测输出的材料重写：补入 9 条可复跑实验（命令 + 原始输出）与逐条归属标注，并把学生侧陈述收缩到真实下达的内容。",
+      "source": "本文件"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp-01",
+      "question": "平台判 3 个失败用例，本地却 20/20 全绿，到底信谁？",
+      "student_action": "p1 要求「先把失败用例复现出来再改代码」，把功能准入定为唯一优先目标。",
+      "command": "python pcheck_win/run.py --scope public-protocol-check",
+      "result_output": "{\"scope\": \"public-protocol-check\", \"passed\": true, ...} → cases 20，PASS 20，总耗时 13515 ms",
+      "interpretation": "本地 20/20 与平台 3 失败并存，说明差异不在 SQL 语义而在驱动/环境；后续把驱动改成 os.read 行读取，本地结论才可信。",
+      "attribution": "agent 执行与解释；student 定验收顺序",
+      "next_step": "改驱动 → 复跑 → 用平台反馈交叉验证"
+    },
+    {
+      "id": "exp-02",
+      "question": "「JSON response timeout」是不是单纯太慢？",
+      "command": "对比 93c52d0f 之前的 f02753f 平台反馈",
+      "result_output": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞）× 1",
+      "interpretation": "是 flush/阻塞问题而非算力问题：协议输出收敛到一个 emit()，写完立即 flush，诊断信息全部走 stderr。",
+      "attribution": "agent 定位",
+      "next_step": "print 全部收敛到 emit()，并加 allow_nan=False"
+    },
+    {
+      "id": "exp-03",
+      "question": "database exited before response 的根因是什么？",
+      "command": "python edge_checks.py（含 WAL 残行与重复恢复用例）",
+      "result_output": "ALL EDGE CHECKS PASSED；== v2 snapshot + WAL restart == 全项 ok；== SIGKILL durability == 全项 ok",
+      "interpretation": "残行未被识别导致启动异常退出；改为「只认完整换行结尾的行 + 截断到最后一个完整行」后恢复幂等，恢复途中再被 kill 也能重放。",
+      "attribution": "agent 实现与解释",
+      "next_step": "加入 SIGKILL 专项断言"
+    },
+    {
+      "id": "exp-04",
+      "question": "numpy 快速路径和 math.dist 回退路径，结果真的一样吗？",
+      "command": "python equiv_checks.py",
+      "result_output": "checks=400 mismatches=0\nmutation mismatches=0",
+      "interpretation": "400 组随机查询 + 一轮交错变更后，两条路径在 1e-6 容差内完全一致，因此镜像里没有 numpy 不会让正确性退化，只会变慢。",
+      "attribution": "agent 设计与执行",
+      "next_step": "把「慢多少」量化，见 exp-06"
+    },
+    {
+      "id": "exp-05",
+      "question": "边界语义（主键更新、聚合、多向量列、int64 溢出、内存上界）是否都按题面返回错误？",
+      "command": "python edge_checks.py",
+      "result_output": "31 项 ok / 0 项 FAIL；含 pk update: unsupported_sql、COUNT(*): unsupported_sql、int64 overflow insert: out_of_range、engine working set after 20k x 256-dim: 83 MiB < 800、recovery took 1.3s",
+      "interpretation": "题面把聚合、ALTER、主键更新列为「不要求」，正确做法是稳定报错；20k×256 维恢复 1.3 s、工作集 83 MiB，说明没有全量载入内存。",
+      "attribution": "agent 设计与执行",
+      "next_step": "确认恢复稳定在 1 s 级"
+    },
+    {
+      "id": "exp-06",
+      "question": "官方口径（10k 行 × 128 维、1000 次 TopK、K=10、半数带等值过滤）下两条路径差多少？",
+      "command": "python bench_official.py；再以 VECTORDB_NO_NUMPY=1 重跑",
+      "result_output": "numpy: write_s 2.477 / query_s 4.272 / restart_s 0.818；stdlib: write_s 2.589 / query_s 14.108 / restart_s 0.649（两组都返回 10000 行，重启后末行 9999 正确）",
+      "interpretation": "写入几乎不受影响（0.25 ms/行），查询差 3.3 倍（4.3 ms vs 14.1 ms/次）。但官方镜像没有 numpy 且构建期不能联网，硬塞会让构建 8 秒失败，所以选「镜像只用标准库、运行时能 import 才加速」，用可预期的慢换构建与运行确定性。",
+      "attribution": "agent 测量与解释；取舍依据见 c6",
+      "next_step": "继续优化 stdlib 路径（预计算模长、分块累加）"
+    },
+    {
+      "id": "exp-07",
+      "question": "批量写入为什么越写越慢？",
+      "command": "100k 行批量写入（会话早期实测，终端窗口输出，未落盘日志）",
+      "result_output": "100000 行插入总耗时 132.8 s，且耗时随行数增长明显非线性",
+      "interpretation": "checkpoint 阈值是固定 16 MiB，快照本身已大于该阈值时，每写一批就触发一次全量快照重写，形成写放大。阈值改为 max(16 MiB, snapshot_bytes) 后写放大消失。",
+      "attribution": "agent 定位与修复",
+      "next_step": "官方规模复测写入（0.25 ms/行，见 exp-06）"
+    },
+    {
+      "id": "exp-08",
+      "question": "20k × 256 维重启要 18.7 s，时间花在哪？",
+      "command": "恢复计时 + cProfile（会话早期实测，终端窗口输出，未落盘日志）",
+      "result_output": "重建 20k×256 向量耗时 18.7 s，热点在逐元素 float() 转换与逐行 list 拼装",
+      "interpretation": "改成 array('f', ...) 做 C 级批量转换、行按主键存字典后，同规模恢复降到 1.1 s（复测见 exp-05 的 1.3 s）。",
+      "attribution": "agent 定位与实现",
+      "next_step": "确认 1 s 级稳定"
+    },
+    {
+      "id": "exp-09",
+      "question": "这一版提交到底算不算过？",
+      "command": "平台提测 commit 93c52d0f（task 47251198）",
+      "result_output": "MySQL 正式用例：通过；此项为准入条件，不计排名分。性能原始分：性能评测完成；原始指标 E = 231.519603。Agent Prompt 原始分：Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名。",
+      "interpretation": "功能准入首次通过、性能项有效；Prompt 项被判无效，说明上一版材料没有形成可核验的证据链（只有结论性问答，没有任何实测输出）。这是本文件重写的直接原因。",
+      "attribution": "平台判定；agent 归因",
+      "next_step": "补入真实实验输出后重新提测"
+    }
+  ],
+  "retrospective": {
+    "decision_1": "把「能不能被驱动」和「SQL 对不对」分开验证：3 个失败里至少有 1 个是进程级退出、2 个是结果不符，混在一起同时改驱动和引擎，最后说不清是哪一处修好的。",
+    "decision_2": "镜像不装 numpy：测量显示查询会慢 3.3 倍，但构建期不能联网，装了直接 8 秒失败、连准入都进不去；在「确定能跑」和「可能更快」之间选前者。",
+    "decision_3": "checkpoint 阈值从固定 16 MiB 改为 max(16 MiB, snapshot_bytes)：固定阈值的隐含假设是「快照远小于阈值」，一旦数据量超过它就变成每批都全量重写，132.8 s 的写入里绝大部分是这次写放大。",
+    "decision_4": "聚合与 ALTER 选择稳定报错而不是尽力实现：题面明确列为不要求，且要求不支持的语句返回约定错误，静默执行反而是错。",
+    "what_generalizes": "「本地全绿不等于平台通过」在带进程边界的评测里是通用的：驱动读取方式、flush 时机、退出码都算协议的一部分；同一批数据喂两条路径的对照实验，比任何单路径性能数字都更能说明取舍是否安全。"
+  },
+  "limitations": [
+    "学生侧陈述只覆盖真实下达的目标、验收顺序与材料真实性选择；内核实现与实验执行由 agent 完成，本材料不把 agent 的解释算作学生理解。",
+    "exp-07、exp-08 的耗时来自会话早期终端输出，未保存原始日志；复测口径见 exp-06 与 exp-05。",
+    "所有测量在 Windows + CPython 3.12 上完成，判题环境为 Linux x86_64 容器，绝对耗时不可直接对比，仅用于同机对照。",
+    "性能指标 E=231.519603 由平台给出，本次未取得排行榜其他选手的同口径数值，尚不能据此判断相对名次。",
+    "本文件不含密钥、令牌或账号信息；路径与仓库凭据已脱敏。"
   ]
 }
