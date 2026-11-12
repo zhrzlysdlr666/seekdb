@@ -58,6 +58,10 @@ private:
   uint64_t row_idx_;
   bool is_fts_index_aux_;
   storage::ObFTParseHelper helper_;
+  // Word map drained and refilled for every document instead of being created
+  // and destroyed once per document.  Building an index over 20000 rows meant
+  // 40k hash-map creates, each of which mallocs its bucket array.
+  storage::ObFTWordMap word_map_;
   bool is_inited_;
 
   DISALLOW_COPY_AND_ASSIGN(ObFTIndexRowCache);
@@ -180,13 +184,16 @@ public:
       const IntFixedArray &row_projector,
       const ObDASWriteBuffer::DmlRow &dml_row,
       ObDomainIndexRow &spat_rows);
+  // reusable_map, when supplied, lets the caller hand in a word map that is
+  // drained and refilled instead of being created and destroyed per document.
   static int generate_fulltext_word_rows(common::ObIAllocator &allocator,
                                          storage::ObFTParseHelper *helper,
                                          const common::ObObjMeta &ft_obj_meta,
                                          const ObDatum &doc_id_datum,
                                          const ObString &fulltext,
                                          const bool is_fts_index_aux,
-                                         ObDomainIndexRow &word_rows);
+                                         ObDomainIndexRow &word_rows,
+                                         storage::ObFTWordMap *reusable_map = nullptr);
   static int generate_multivalue_index_rows(
       ObIAllocator &allocator,
       const ObDASDMLBaseCtDef &das_ctdef,
