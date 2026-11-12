@@ -19,6 +19,10 @@
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "sql/session/ob_basic_session_info.h"
+#include "sql/engine/basic/ob_glob_file_scanner.h"
+#include "sql/engine/basic/ob_jsonl_file_scanner.h"
+#include "sql/engine/basic/ob_parquet_file_scanner.h"
 
 
 namespace oceanbase
@@ -27,14 +31,86 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
+                    is_file_scan_, file_scan_path_, file_scan_root_, file_scan_device_, file_scan_inode_,
+                    file_scan_size_, file_scan_mtime_sec_, file_scan_mtime_nsec_,
+                    file_scan_ctime_sec_, file_scan_ctime_nsec_, file_scan_delimiter_, file_scan_quote_,
+                    file_scan_escape_, file_scan_header_, file_scan_nullstr_, file_scan_is_glob_,
+                    file_scan_format_);
 
 int ObFunctionTableOp::inner_open()
 {
   int ret = OB_SUCCESS;
   node_idx_ = 0;
   already_calc_ = false;
-  if (OB_ISNULL(MY_SPEC.value_expr_)) {
+  if (MY_SPEC.is_file_scan_) {
+    ObSQLSessionInfo *session = ctx_.get_my_session();
+    ObString secure_root;
+    bool enabled = false;
+    void *buf = nullptr;
+    const int64_t scanner_size = MY_SPEC.file_scan_is_glob_ ? sizeof(GlobFileScanner)
+        : MY_SPEC.file_scan_format_ == FILE_SQL_JSONL ? sizeof(JsonlFileScanner)
+        : MY_SPEC.file_scan_format_ == FILE_SQL_PARQUET ? sizeof(ParquetFileScanner)
+        : sizeof(ObCsvFileScanner);
+    ObCsvScanOptions options;
+    options.field_terminator_ = MY_SPEC.file_scan_delimiter_;
+    options.field_enclosure_ = MY_SPEC.file_scan_quote_;
+    options.field_escape_ = MY_SPEC.file_scan_escape_;
+    options.has_header_ = MY_SPEC.file_scan_header_;
+    if (!MY_SPEC.file_scan_nullstr_.empty()) {
+      options.null_string_.assign(MY_SPEC.file_scan_nullstr_.ptr(), MY_SPEC.file_scan_nullstr_.length());
+    }
+    ObFileFingerprint expected_fingerprint;
+    expected_fingerprint.device_ = MY_SPEC.file_scan_device_;
+    expected_fingerprint.inode_ = MY_SPEC.file_scan_inode_;
+    expected_fingerprint.size_ = MY_SPEC.file_scan_size_;
+    expected_fingerprint.mtime_sec_ = MY_SPEC.file_scan_mtime_sec_;
+    expected_fingerprint.mtime_nsec_ = MY_SPEC.file_scan_mtime_nsec_;
+    expected_fingerprint.ctime_sec_ = MY_SPEC.file_scan_ctime_sec_;
+    expected_fingerprint.ctime_nsec_ = MY_SPEC.file_scan_ctime_nsec_;
+    if (OB_ISNULL(session)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+    } else if (!enabled) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL while enable_file_sql is OFF");
+    } else if (OB_FAIL(session->get_secure_file_priv(secure_root))) {
+    } else if (secure_root != MY_SPEC.file_scan_root_) {
+      ret = OB_ERR_NO_PRIVILEGE;
+      LOG_USER_ERROR(OB_ERR_NO_PRIVILEGE, "FILE");
+    } else if (!MY_SPEC.file_scan_is_glob_ && MY_SPEC.file_scan_format_ != FILE_SQL_CSV
+               && MY_SPEC.file_scan_format_ != FILE_SQL_JSONL
+               && MY_SPEC.file_scan_format_ != FILE_SQL_PARQUET) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "unknown file scan format");
+    } else if (OB_ISNULL(buf = get_exec_ctx().get_allocator().alloc(scanner_size))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      if (MY_SPEC.file_scan_is_glob_) {
+        file_scanner_ = new (buf) GlobFileScanner();
+        ret = file_scanner_->open(MY_SPEC.file_scan_root_, MY_SPEC.file_scan_path_);
+      } else if (MY_SPEC.file_scan_format_ == FILE_SQL_JSONL) {
+        file_scanner_ = new (buf) JsonlFileScanner();
+        ret = file_scanner_->open(MY_SPEC.file_scan_root_, MY_SPEC.file_scan_path_, &expected_fingerprint);
+      } else if (MY_SPEC.file_scan_format_ == FILE_SQL_PARQUET) {
+        file_scanner_ = new (buf) ParquetFileScanner();
+        ret = file_scanner_->open(MY_SPEC.file_scan_root_, MY_SPEC.file_scan_path_, &expected_fingerprint);
+      } else {
+        ObCsvFileScanner *csv = new (buf) ObCsvFileScanner();
+        file_scanner_ = csv;
+        ret = csv->open(MY_SPEC.file_scan_root_, MY_SPEC.file_scan_path_, options, &expected_fingerprint);
+      }
+    }
+    if (OB_FAIL(ret) && file_scanner_ != nullptr) {
+      LOG_ERROR("file scan execution open failed", K(ret), K(MY_SPEC.file_scan_path_),
+                K(MY_SPEC.file_scan_root_));
+      file_scanner_->~ObFileScanner();
+      get_exec_ctx().get_allocator().free(file_scanner_);
+      file_scanner_ = nullptr;
+    } else if (OB_SUCC(ret)) {
+      next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file_scan;
+    }
+  } else if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
@@ -50,7 +126,12 @@ int ObFunctionTableOp::inner_rescan()
   if (OB_FAIL(ObOperator::inner_rescan())) {
   } else {
     node_idx_ = 0;
-    if (MY_SPEC.has_correlated_expr_) {
+    if (MY_SPEC.is_file_scan_) {
+      if (OB_ISNULL(file_scanner_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(file_scanner_->rescan())) {
+      }
+    } else if (MY_SPEC.has_correlated_expr_) {
       row_count_ = 0;
       col_count_ = 0;
       value_table_ = NULL;
@@ -67,11 +148,22 @@ int ObFunctionTableOp::inner_close()
   row_count_ = 0;
   col_count_ = 0;
   value_table_ = NULL;
+  if (OB_NOT_NULL(file_scanner_)) {
+    file_scanner_->close();
+    file_scanner_->~ObFileScanner();
+    get_exec_ctx().get_allocator().free(file_scanner_);
+    file_scanner_ = nullptr;
+  }
   return ret;
 }
 
 void ObFunctionTableOp::destroy()
 {
+  if (file_scanner_ != nullptr) {
+    file_scanner_->~ObFileScanner();
+    get_exec_ctx().get_allocator().free(file_scanner_);
+    file_scanner_ = nullptr;
+  }
   ObOperator::destroy();
 }
 
@@ -102,6 +194,49 @@ int ObFunctionTableOp::get_current_result(ObObj &result)
 int ObFunctionTableOp::inner_get_next_row()
 {
   return (this->*next_row_func_)();
+}
+
+int ObFunctionTableOp::inner_get_next_row_file_scan()
+{
+  int ret = OB_SUCCESS;
+  bool has_row = false;
+  clear_evaluated_flag();
+  if (OB_ISNULL(file_scanner_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(ctx_.check_status())) {
+  } else if (OB_FAIL(file_scanner_->next_row(file_row_, has_row))) {
+    LOG_ERROR("file scan execution row read failed", K(ret), K(file_row_.count()));
+  } else if (!has_row) {
+    ret = OB_ITER_END;
+  } else if (file_row_.count() != MY_SPEC.column_exprs_.count()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("file scan output column count mismatch", K(file_row_.count()),
+              K(MY_SPEC.column_exprs_.count()));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < file_row_.count(); ++i) {
+      ObObj &obj = file_row_.at(i);
+      ObExpr *expr = MY_SPEC.column_exprs_.at(i);
+      if (OB_ISNULL(expr)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (obj.is_null()) {
+        expr->locate_datum_for_write(eval_ctx_).set_null();
+        expr->set_evaluated_projected(eval_ctx_);
+      } else if (OB_FAIL(expr->locate_datum_for_write(eval_ctx_).from_obj(obj, expr->obj_datum_map_))) {
+      } else {
+        if (obj.is_string_type() && obj.get_string_len() > 0) {
+          char *buffer = expr->get_str_res_mem(eval_ctx_, obj.get_string_len());
+          if (OB_ISNULL(buffer)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            MEMCPY(buffer, obj.get_string_ptr(), obj.get_string_len());
+            expr->locate_datum_for_write(eval_ctx_).set_string(buffer, obj.get_string_len());
+          }
+        }
+        expr->set_evaluated_projected(eval_ctx_);
+      }
+    }
+  }
+  return ret;
 }
 
 int ObFunctionTableOp::inner_get_next_row_udf()

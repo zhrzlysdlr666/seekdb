@@ -1976,7 +1976,7 @@ int ObTransformUtils::is_column_expr_not_null(ObNotNullContext &ctx,
     // 'NOT NULL' of the virtual table is unreliable
   } else if (ObOptimizerUtil::find_item(ctx.right_table_ids_, table->table_id_)) {
     // do nothing
-  } else if (table->is_basic_table()) {
+  } else if (table->is_basic_table() || table->is_file_scan_table_) {
     if (ctx.is_for_ctas_) {
       is_not_null = expr->get_result_type().has_result_flag(HAS_NOT_NULL_VALIDATE_CONSTRAINT_FLAG);
     } else {

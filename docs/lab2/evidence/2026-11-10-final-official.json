@@ -1,0 +1,20 @@
+{
+  "recorded_at": "2026-11-10T06:18:38.874380+00:00",
+  "kind": "unchanged official mysqltest file_sql_basic",
+  "returncode": 0,
+  "stdout": "ok\n",
+  "stderr": "",
+  "run_directory": "/home/wangjiayi/.local/share/seekdb-lab2-audit-20261109/mysqltest-1794291518044029449",
+  "official_files_unchanged": true,
+  "official_file_sha256": {
+    "data/basic.csv": "a7ec34e2f8af792f4eab88e021af5832cfcd5bfcc4daa42c976289853c5b9789",
+    "data/basic.jsonl": "caacf710d399ad1f397507d437ecfefb99ab97d21d70d4cb4f3615b402777ff8",
+    "data/invalid.txt": "8e23bc8948f0b1e94dd78fe8112ce56110bed0123095e79c93e9c9dd403e0146",
+    "data/simple.parquet.b64": "47f6dc957a4d4bed8ccb93b34048c7f1216b000388b01db2a788a3533a30c36f",
+    "include/copy_file_sql_data.inc": "2afa1c16228e95e7ef66e1e8f708e7b3f293abbfe0c2e036aaa894a628ae5397",
+    "include/remove_file_sql_data.inc": "2ef6c6552603488a5af2cba50d473fbcff28771f04cc4ca0c90cec5b1494f286",
+    "r/mysql/file_sql_basic.result": "9470b723a812113c47239aac604bfdf17738885c34bb47a8e40da25429d8c71f",
+    "t/file_sql_basic.test": "64d864215ada8c94a12a85ea71573ad8b1fb13ebaf70f4dc4765b544162da0d2"
+  },
+  "temporary_ssh_authorization_removed": true
+}

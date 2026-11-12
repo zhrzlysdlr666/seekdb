@@ -1344,7 +1344,8 @@ int ObTransformSemiToInner::find_operator(ObLogicalOperator* root,
     if (scan->get_table_id() == table_id) {
       table_op = scan;
     }
-  } else if (log_op_def::LOG_FUNCTION_TABLE == root->get_type()) {
+  } else if (log_op_def::LOG_FUNCTION_TABLE == root->get_type()
+             || log_op_def::LOG_FILE_SCAN == root->get_type()) {
     ObLogFunctionTable *scan = static_cast<ObLogFunctionTable *>(root);
     if (scan->get_table_id() == table_id) {
       table_op = scan;

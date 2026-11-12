@@ -2235,7 +2235,8 @@ int ObLogPlan::allocate_function_table_path(FunctionTablePath *func_table_path,
       OB_ISNULL(table_item = get_stmt()->get_table_item_by_id(func_table_path->table_id_))) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(op = static_cast<ObLogFunctionTable*>(get_log_op_factory().
-                                        allocate(*this, LOG_FUNCTION_TABLE)))) {
+                                        allocate(*this, table_item->is_file_scan_table_
+                                            ? LOG_FILE_SCAN : LOG_FUNCTION_TABLE)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
     op->set_table_id(func_table_path->table_id_);

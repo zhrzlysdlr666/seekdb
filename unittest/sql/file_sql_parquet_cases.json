@@ -1,0 +1,21 @@
+{
+  "format": "Parquet native scanner correctness plan",
+  "positive": [
+    "official simple.parquet: BIGINT c1, seven rows 0..6",
+    "required and nullable flat Boolean, Int32, Int64, Float, Double, UTF8 strings",
+    "DATE and TIMESTAMP millis/micros, negative epochs and microsecond precision",
+    "UNCOMPRESSED and Snappy, PLAIN and RLE_DICTIONARY/PLAIN_DICTIONARY",
+    "multiple row groups and multiple Data Page V1/V2 pages, dictionary fallback",
+    "definition level hybrid RLE and bit packed runs, dictionary bit widths 0..32",
+    "reordered and duplicate projected columns; explicit empty projection yields metadata rows",
+    "rescan reproduces all rows and projected order"
+  ],
+  "negative": [
+    "bad PAR1, truncated footer, corrupt compact varints, missing required metadata: 1210",
+    "nested/repeated, unsupported types/encodings/codecs including ZSTD with COUNT: 1235",
+    "negative/overflowing offsets, chunk sizes, page counts, invalid dictionary indices: 1210",
+    "truncated Snappy, invalid backreference, claimed output size mismatch: 1210",
+    "page >64MiB, field >16MiB, schema >4096 columns rejected before allocation",
+    "changed file between open/read/rescan rejected; unselected corrupt page never read"
+  ]
+}

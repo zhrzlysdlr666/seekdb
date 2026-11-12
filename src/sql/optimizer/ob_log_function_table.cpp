@@ -25,6 +25,12 @@ namespace oceanbase
 namespace sql
 {
 
+const char *ObLogFunctionTable::get_name() const
+{
+  const TableItem *table = get_stmt() == nullptr ? nullptr : get_stmt()->get_table_item_by_id(table_id_);
+  return table != nullptr && table->is_file_scan_table_ ? "FILE SCAN" : ObLogicalOperator::get_name();
+}
+
 int ObLogFunctionTable::generate_access_exprs()
 {
   int ret = OB_SUCCESS;

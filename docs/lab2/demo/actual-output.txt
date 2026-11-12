@@ -1,0 +1,29 @@
+id	label	value
+1	A;B	NULL
+2		4
+column_name	column_type	null	key	default	extra
+id	BIGINT	NO	NULL	NULL	NULL
+name	VARCHAR	NO	NULL	NULL	NULL
+total	DOUBLE	YES	NULL	NULL	NULL
+file
+options.csv
+sales.csv
+rows_read	total
+3	18
+Query Plan
+==================================================
+|ID|OPERATOR   |NAME       |EST.ROWS|EST.TIME(us)|
+--------------------------------------------------
+|0 |SORT       |           |3       |2           |
+|1 |└─FILE_SCAN|FUNC_TABLE1|3       |2           |
+==================================================
+Outputs & filters:
+-------------------------------------
+  0 - output([FUNC_TABLE1.name], [FUNC_TABLE1.amount]), filter(nil), rowset=16
+      sort_keys([FUNC_TABLE1.amount, ASC])
+  1 - output([FUNC_TABLE1.name], [FUNC_TABLE1.amount]), filter([FUNC_TABLE1.amount > cast(8, DOUBLE(-1, -1))]), rowset=16
+      value('/home/wangjiayi/seekdb/docs/lab2/demo/sales.csv')
+id	name	amount
+1	Alice	10.5
+2	Bob	NULL
+3	Chen	7.5

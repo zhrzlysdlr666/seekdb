@@ -1,0 +1,20 @@
+{
+  "description": "Focused JSONL contracts. Write fixture_utf8 verbatim; substitute a SQL-quoted fixture path for {path}.",
+  "cases": [
+    {"name": "jsonl_union_bom_crlf", "fixture_utf8": "\ufeff{\"b\":1}\r\n\r\n {\"a\":\"ok\"}\r\n", "sql": "SELECT * FROM read_ndjson({path})", "expected_rows": "1\tNULL\nNULL\tok\n"},
+    {"name": "jsonl_native_conflict", "fixture_utf8": "{\"a\":1}\n{\"a\":\"001\"}\n", "sql": "SELECT a FROM read_json({path})", "expected_rows": "1\n001\n"},
+    {"name": "jsonl_native_string_schema", "fixture_utf8": "{\"s\":\"1\",\"b\":true,\"d\":\"2024-02-29\",\"n\":null}\n", "sql": "DESCRIBE SELECT * FROM read_json({path})", "expected_rows": "s\tVARCHAR\tNO\tNULL\tNULL\tNULL\nb\tBOOLEAN\tNO\tNULL\tNULL\tNULL\nd\tDATE\tNO\tNULL\tNULL\tNULL\nn\tVARCHAR\tYES\tNULL\tNULL\tNULL\n"},
+    {"name": "jsonl_unicode_surrogate", "fixture_utf8": "{\"s\":\"\\u4e2d\\ud83d\\ude00\\u0000\"}\n", "sql": "SELECT hex(s) FROM read_json({path})", "expected_rows": "E4B8ADF09F988000\n"},
+    {"name": "jsonl_numeric_grammar", "fixture_utf8": "{\"n\":-1.25e+2}\n{\"n\":2}\n", "sql": "SELECT n FROM read_json({path})", "expected_rows": "-125\n2\n"},
+    {"name": "jsonl_empty_object_rows", "fixture_utf8": "{}\n{\"id\":2}\n{}\n", "sql": "SELECT count(*), count(id) FROM read_json({path})", "expected_rows": "3\t1\n"},
+    {"name": "jsonl_duplicate_decoded_keys", "fixture_utf8": "{\"a\":1,\"\\u0061\":2}\n", "sql": "SELECT count(*) FROM read_json({path})", "expected_error": 1210},
+    {"name": "jsonl_nested_count", "fixture_utf8": "{\"a\":[1]}\n", "sql": "SELECT count(*) FROM read_json({path})", "expected_error": 1235},
+    {"name": "jsonl_nested_object", "fixture_utf8": "{\"a\":{}}\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1235},
+    {"name": "jsonl_top_level_array", "fixture_utf8": "[1,2]\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1210},
+    {"name": "jsonl_leading_zero", "fixture_utf8": "{\"a\":01}\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1210},
+    {"name": "jsonl_trailing_comma", "fixture_utf8": "{\"a\":1,}\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1210},
+    {"name": "jsonl_bad_second_line", "fixture_utf8": "{\"a\":1}\n{\"a\":}\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1210, "error_contains": "line 2"},
+    {"name": "jsonl_lone_surrogate", "fixture_utf8": "{\"a\":\"\\ud800\"}\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1210},
+    {"name": "jsonl_empty_file", "fixture_utf8": "\n \t\r\n", "sql": "SELECT * FROM read_json({path})", "expected_error": 1210}
+  ]
+}
