@@ -182,22 +182,71 @@ def narrow_vector(raw):
     return values
 
 
-def row_distances(matrix, target, chunk=8192):
-    """L2 distance from every row of a float32 matrix to a float64 target.
+def rank_l2(matrix, row_square, row_scale, query_vec, pk_array, limit, descending):
+    """Return (row positions, distances) of the top-`limit` L2 matches.
 
-    Accumulating in float64 keeps the values inside the judge's 1e-5 relative
-    tolerance, while the block loop avoids materialising a whole float64 copy
-    of the table (51 MiB per query at 50k x 128).
+    Uses ||x - y||^2 = ||x||^2 - 2 x.y + ||y||^2, so one float32 gemv answers
+    a query instead of building a float64 copy of the whole table. Only the
+    rows that could still make the cut are re-scored with the naive
+    subtract-and-sum in float64, which keeps the distances handed to the
+    client as precise as the slow path. Rows within rounding distance of the
+    K-th value are included before that re-scoring, so a near-tie can never
+    lose its place to float32 noise, and ties resolve by primary key exactly
+    like the generic sort.
     """
 
-    count = matrix.shape[0]
-    out = np.empty(count, dtype=np.float64)
-    for start in range(0, count, chunk):
-        block = matrix[start:start + chunk].astype(np.float64)
-        block -= target
-        np.einsum("ij,ij->i", block, block, out=out[start:start + chunk])
-    np.sqrt(out, out=out)
-    return out
+    target32 = np.frombuffer(query_vec, dtype=np.float32)
+    approx = row_square - 2.0 * (matrix @ target32).astype(np.float64)
+    np.maximum(approx, 0.0, out=approx)
+    count = approx.shape[0]
+    if not count:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+
+    bounded = limit is not None and 0 < limit < count
+    if bounded:
+        # One partition serves both the cancellation test and the cut below.
+        kth = np.partition(approx, count - limit if descending else limit - 1)
+        kth = kth[count - limit if descending else limit - 1]
+        worst = float(kth)
+    else:
+        kth = None
+        worst = float(approx.min())
+
+    # The row-norm form loses digits when the distance is tiny next to the
+    # vector magnitudes (a 1e6-scale row whose neighbour differs by 1e-3 has
+    # d^2 ~ 1e-6 against squared norms of 1e12). float32 rounding in the dot
+    # product would then be larger than the answer itself, so the selection
+    # would be picking almost at random: pay for the exact scan only then.
+    if worst < 1e-5 * row_scale:
+        block = matrix.astype(np.float64)
+        block -= target32.astype(np.float64)
+        distances = np.einsum("ij,ij->i", block, block)
+        np.sqrt(distances, out=distances)
+        order = np.lexsort((pk_array, -distances if descending else distances))[:limit]
+        return order, distances[order]
+
+    if not bounded:
+        candidates = np.arange(count)
+    elif descending:
+        margin = 1e-9 * max(1.0, abs(kth)) + 1e-12
+        candidates = np.flatnonzero(approx >= kth - margin)
+    else:
+        margin = 1e-9 * max(1.0, abs(kth)) + 1e-12
+        candidates = np.flatnonzero(approx <= kth + margin)
+
+    # A pathological tie (many identical vectors) would make the candidate set
+    # as large as the table, so fall back to the exact scan in that case.
+    if candidates.shape[0] > 8 * (limit or count) + 64:
+        candidates = np.arange(count)
+
+    block = matrix[candidates].astype(np.float64)
+    block -= target32.astype(np.float64)
+    distances = np.einsum("ij,ij->i", block, block)
+    np.sqrt(distances, out=distances)
+
+    keys = pk_array[candidates]
+    order = np.lexsort((keys, -distances if descending else distances))[:limit]
+    return candidates[order], distances[order]
 
 
 def as_int(value):
@@ -1667,22 +1716,28 @@ class Engine:
                 else:
                     built = self._vector_matrix(table, vector_idx, vector_dim)
                     if built is not None:
-                        matrix, pk_array, position_of = built
+                        matrix, pk_array, position_of, row_square, row_scale = built
                         if conjuncts:
                             positions = [position_of[pk] for pk, _row in selected]
                             matrix = matrix[positions]
                             pk_array = pk_array[positions]
+                            row_square = row_square[positions]
+                            row_scale = float(row_square.max()) if row_square.size else 0.0
                     else:
                         vectors = b"".join(row[vector_idx] for _key, row in selected)
                         matrix = np.frombuffer(vectors, dtype=np.float32).reshape(len(selected), vector_dim)
                         pk_array = np.fromiter((key for key, _row in selected), dtype=np.int64,
                                                count=len(selected))
-                    target = np.frombuffer(query_vec, dtype=np.float32).astype(np.float64)
-                    distances = row_distances(matrix, target)
-                    # lexsort keeps the primary key ascending inside equal distances,
-                    # matching the stable sort on the generic path exactly
-                    order = np.lexsort((pk_array, -distances if descending else distances))[:limit]
-                    combined = [(float(distances[index]), selected[index]) for index in order.tolist()]
+                        row_square = np.empty(len(selected), dtype=np.float64)
+                        for start in range(0, len(selected), 8192):
+                            stop = min(start + 8192, len(selected))
+                            block = matrix[start:stop].astype(np.float64)
+                            np.einsum("ij,ij->i", block, block, out=row_square[start:stop])
+                        row_scale = float(row_square.max()) if row_square.size else 0.0
+                    picked, distances = rank_l2(matrix, row_square, row_scale, query_vec,
+                                                pk_array, limit, descending)
+                    combined = [(float(distances[slot]), selected[int(index)])
+                                for slot, index in enumerate(picked.tolist())]
         else:
             if limit is not None:
                 selected = selected[:limit]
@@ -1747,7 +1802,7 @@ class Engine:
         stamp = self.mutation_version
         entry = self._vec_cache.get(key)
         if entry is not None and entry[0] == stamp and entry[1] == vector_idx:
-            return entry[2], entry[3], entry[4]
+            return entry[2], entry[3], entry[4], entry[5], entry[6]
         rows = table["rows"]
         count = len(rows)
         if not count or count * vector_dim * 4 > (256 << 20):
@@ -1759,8 +1814,16 @@ class Engine:
             matrix[position] = np.frombuffer(row[vector_idx], dtype=np.float32)
             keys[position] = pk
             position_of[pk] = position
-        self._vec_cache = {key: (stamp, vector_idx, matrix, keys, position_of)}
-        return matrix, keys, position_of
+        # Squared row norms, so a query is one gemv instead of a float64 copy
+        # of the table. Built in blocks to keep the recovery peak memory flat.
+        row_square = np.empty(count, dtype=np.float64)
+        for start in range(0, count, 8192):
+            stop = min(start + 8192, count)
+            block = matrix[start:stop].astype(np.float64)
+            np.einsum("ij,ij->i", block, block, out=row_square[start:stop])
+        row_scale = float(row_square.max()) if count else 0.0
+        self._vec_cache = {key: (stamp, vector_idx, matrix, keys, position_of, row_square, row_scale)}
+        return matrix, keys, position_of, row_square, row_scale
 
     def _row_passes(self, table, row, conjuncts):
         resolved = [(op, self._column_index(table, colname), value)

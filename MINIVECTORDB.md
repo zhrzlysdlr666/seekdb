@@ -13,7 +13,7 @@ docker run -i --rm --network=none --read-only \
 ```
 
 - 基础镜像 `python:3.12-slim`，**构建阶段不联网**：numpy 以固定版本 wheel 的形式放在 `vendor/`，用 `pip install --no-index --find-links=/app/vendor` 离线安装；装不上（或 import 失败）就自动回退标准库路径，构建与启动都不会因此失败。
-- 向量距离的三种实现按环境自动选择：numpy 可导入时用 float32 矩阵 + float64 分块累加（最快）；否则用 `math.dist`（C 层单行距离计算）+ 堆选择；再退化为纯 Python 逐元素计算。三条路径结果一致（本地 400 组随机查询逐行比对无差异）。
+- 向量距离的三条实现按环境自动选择：numpy 可导入时用「模长预计算 + 一次 float32 矩阵向量乘」选出前 K 候选，再用逐元素相减的 float64 算法对候选精确重算；否则用 `math.dist`（C 层单行距离计算）+ 堆选择；再退化为纯 Python 逐元素计算。三条路径结果一致（本地 400 组随机查询逐行比对无差异，另有 642 条 SQL 的针对并列/量级差距的逐字节比对）。模长公式在「距离远小于向量量级」时会丢精度，此时自动退回精确扫描（`rank_l2` 里的量级自检）。
 - 容器前台运行，`CMD ["python", "-u", "/app/minivectordb.py"]`，不监听任何端口。
 - 数据目录：容器内固定为 `/data`（可用环境变量 `VECTORDB_DATA_DIR` 覆盖，供本地测试）。
 
