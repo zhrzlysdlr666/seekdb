@@ -244,7 +244,6 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
   } else {
     next_token.reset();
     token_freq = 0;
-    norm_allocator_.reuse();
     ObDatum tmp_datum;
     bool found_alnum = false;
     uint32_t norm_token_len = 0;
@@ -293,10 +292,25 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else if (OB_UNLIKELY(!found_alnum)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      ObString norm_alnum_token(norm_token_len, norm_token_ptr);
+      const int64_t casemulti = MAX(static_cast<int64_t>(cs_->casedn_multiply), 1);
+      const int64_t need = static_cast<int64_t>(norm_token_len) * casemulti;
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      if (need <= NORM_LOCAL_BUF_SIZE) {
+        // Fits in the per-stream scratch buffer: no arena, no chunk churn.
+        const size_t out_len = cs_->cset->casedn(cs_,
+                                                 const_cast<char *>(norm_token_ptr),
+                                                 static_cast<size_t>(norm_token_len),
+                                                 lower_buf_,
+                                                 static_cast<size_t>(sizeof(lower_buf_)));
+        norm_lower_token.assign_ptr(lower_buf_,
+                                    static_cast<ObString::obstr_size_t>(out_len));
       } else {
+        ObString norm_alnum_token(norm_token_len, norm_token_ptr);
+        norm_allocator_.reuse();
+        if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
         next_token.set_string(norm_lower_token);
       }
     }

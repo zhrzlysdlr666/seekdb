@@ -103,7 +103,13 @@ int ObFTDocWordScanIterator::do_table_rescan()
 #ifdef OB_BUILD_PACKAGE
   LOG_TRACE("doc word rescan", K(ret), K(scan_param_));
 #else
-  LOG_INFO("doc word rescan", K(ret), K(scan_param_));
+  // This runs once per scanned document, i.e. once per row for a MATCH query and
+  // once per row for a full-text index build. At the default syslog_level
+  // (EDIAG) INFO is enabled, so every one of those rows used to serialize the
+  // whole ObTableScanParam into the log. Keep it at TRACE, which is disabled by
+  // default, so the diagnostics are still available without paying for them on
+  // the hot path.
+  LOG_TRACE("doc word rescan", K(ret), K(scan_param_));
 #endif
   return ret;
 }
@@ -274,7 +280,9 @@ int ObFTDocWordScanIterator::do_table_scan()
 #ifdef OB_BUILD_PACKAGE
   LOG_TRACE("doc word scan", K(ret), K(scan_param_));
 #else
-  LOG_INFO("doc word scan", K(ret), K(scan_param_));
+  // See the note in do_table_rescan(): this is a per-scan, per-row path and INFO
+  // is enabled at the default syslog_level, so it must not be INFO.
+  LOG_TRACE("doc word scan", K(ret), K(scan_param_));
 #endif
   return ret;
 }

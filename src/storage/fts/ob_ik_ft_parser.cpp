@@ -137,7 +137,7 @@ int ObIKFTParser::process_one_char(TokenizeContext &ctx,
   // process by char with all segmenters; iterate the fixed size array to avoid
   // the ObList iterator overhead on this per character hot path.
   for (int64_t i = 0; OB_SUCC(ret) && i < segmenter_cnt_; ++i) {
-    if (OB_FAIL(seg_arr_[i]->process(ctx))) {
+    if (OB_FAIL(seg_arr_[i]->process(ctx, ch, char_len, type))) {
     }
   }
   return ret;

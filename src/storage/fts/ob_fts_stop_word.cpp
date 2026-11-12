@@ -74,23 +74,38 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
+    const ObCollationType src_coll = word.get_collation_type();
+    const ObCollationType dst_coll = stopword_type_.get_collation_type();
+    ObString cmp_str;
+    if (!ObCharset::is_valid_collation(src_coll) || !ObCharset::is_valid_collation(dst_coll)) {
+      // Mirror the validation charset_convert() performs before it does any work.
+      ret = OB_INVALID_ARGUMENT;
+    } else if (ObCharset::charset_type_by_coll(src_coll)
+               == ObCharset::charset_type_by_coll(dst_coll)) {
+      // Fast path: charset_convert() only hands back a shallow copy of the input
+      // when source and target share a charset (see its same-charset branch), so
+      // the conversion below would not touch the allocator at all. Building a
+      // per-token arena just to be handed the same string back was measurable
+      // overhead on the beng tokenize / index-build hot path.
+      cmp_str = word.get_word().get_string();
     } else {
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      if (OB_FAIL(common::ObCharset::charset_convert(
+                                     allocator,
+                                     word.get_word().get_string(),
+                                     src_coll,
+                                     dst_coll,
+                                     cmp_str))) {
+      }
+    }
+
+    if (OB_SUCC(ret)) {
       ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
       if (OB_HASH_NOT_EXIST == ret) {
@@ -101,7 +116,6 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         ret = OB_SUCCESS;
       } else if (OB_SUCC(ret)) {
         ret = OB_ERR_UNEXPECTED;
-      } else {
       }
     }
   }

@@ -131,7 +131,15 @@ public:
   virtual void reuse() override;
   virtual int get_next(ObDatum &next_token, int64_t &token_freq) override;
 private:
+  // Scratch space for the lower-cased token. get_next() used to hand every
+  // single token to norm_allocator_, and because it reuse()d that arena at the
+  // top of every call, each token re-requested a fresh chunk just to hold a few
+  // dozen bytes. Tokens that fit in this buffer never touch the heap at all;
+  // the pointer handed back to the caller stays valid until the next get_next(),
+  // which is exactly the lifetime the arena gave it.
+  static constexpr int64_t NORM_LOCAL_BUF_SIZE = 256;
   ObArenaAllocator norm_allocator_;
+  char lower_buf_[NORM_LOCAL_BUF_SIZE];
 };
 
 // group (deduplicate) and count

@@ -101,7 +101,17 @@ public:
 
   virtual ~ObIIKProcessor() {}
 
-  int process(TokenizeContext &ctx);
+  // The current character is resolved once per character by the caller and
+  // forwarded here. Re-reading it through TokenizeContext from every processor
+  // cost two extra out-of-line calls plus two end-of-text checks per processor
+  // per character, which is pure overhead on the tokenizer hot path.
+  OB_INLINE int process(TokenizeContext &ctx,
+                        const char *ch,
+                        const uint8_t char_len,
+                        const ObFTCharUtil::CharType type)
+  {
+    return do_process(ctx, ch, char_len, type);
+  }
 
   virtual int do_process(TokenizeContext &ctx,
                          const char *ch,
