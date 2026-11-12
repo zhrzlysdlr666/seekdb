@@ -1300,19 +1300,25 @@ class Engine:
                 if values[index] is None:
                     raise fail("not_null_violation", f"column {column['name']} needs a value")
             prepared.append(values)
-        seen = set()
-        for values in prepared:
-            if primary is not None:
+        # Validate every row before touching the table: a failed multi-row
+        # INSERT must not leave the earlier rows behind (statement atomicity).
+        keys = []
+        if primary is not None:
+            seen = set()
+            for values in prepared:
                 key = values[primary]
-                if key in seen:
+                if key in seen or key in table["rows"]:
                     raise fail("duplicate_key", "duplicate primary key")
                 seen.add(key)
-                if key in table["rows"]:
-                    raise fail("duplicate_key", "duplicate primary key")
-            else:
-                key = len(table["rows"])
-                while key in table["rows"]:
-                    key += 1
+                keys.append(key)
+        else:
+            candidate = len(table["rows"])
+            for _ in prepared:
+                while candidate in table["rows"]:
+                    candidate += 1
+                keys.append(candidate)
+                candidate += 1
+        for values, key in zip(prepared, keys):
             if self.transaction is not None:
                 self.transaction["undo"].append(
                     (table_name, key, table["rows"].get(key))
@@ -1372,6 +1378,9 @@ class Engine:
             self._stage({"op": "put", "table": table_name, "pk": key, "row": new_row})
             return {"affected_rows": 1}
 
+        # Same atomicity rule as INSERT: evaluate every target row first so a
+        # coercion failure on a later row cannot leave earlier rows updated.
+        pending = []
         for key in list(table["rows"].keys()):
             row = table["rows"].get(key)
             if row is None:
@@ -1384,6 +1393,8 @@ class Engine:
                 new_row[index] = self._coerce(table, index, self._eval(node, context))
             if primary is not None and new_row[primary] != key:
                 raise fail("unsupported_sql", "updating the primary key is not supported")
+            pending.append((key, row, new_row))
+        for key, row, new_row in pending:
             if self.transaction is not None:
                 self.transaction["undo"].append((table_name, key, list(row)))
             table["rows"][key] = new_row
