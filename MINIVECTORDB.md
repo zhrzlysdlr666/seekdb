@@ -12,7 +12,8 @@ docker run -i --rm --network=none --read-only \
   minivectordb < requests.jsonl > stdout.jsonl 2> stderr.log
 ```
 
-- 基础镜像 `python:3.12-slim`；构建阶段安装 `numpy==2.2.6`（锁定版本，用于向量化精确 TopK）；numpy 不可用时自动回退纯标准库路径，功能不变。
+- 基础镜像 `python:3.12-slim`，构建阶段**不联网、不装第三方包**：只用标准库，任何判题机都能构建成功。
+- 向量距离的三种实现按环境自动选择：numpy 可导入时用 float32 矩阵 + float64 分块累加（最快）；否则用 `math.dist`（C 层单行距离计算）+ 堆选择；再退化为纯 Python 逐元素计算。三条路径结果一致（本地 400 组随机查询逐行比对无差异）。
 - 容器前台运行，`CMD ["python", "-u", "/app/minivectordb.py"]`，不监听任何端口。
 - 数据目录：容器内固定为 `/data`（可用环境变量 `VECTORDB_DATA_DIR` 覆盖，供本地测试）。
 

@@ -14,10 +14,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY minivectordb.py /app/minivectordb.py
 
-# numpy accelerates exact TopK scans; the version is pinned. If the index is
-# unavailable the engine still runs on the pure-stdlib fallback path.
-RUN pip install --no-cache-dir numpy==2.2.6 \
-    || python -c "print('numpy unavailable, using pure-python fallback')"
+# No pip step on purpose: the build must succeed on a judge machine without
+# package-index access. The engine needs only the standard library (it uses
+# numpy when it happens to be importable, and math.dist otherwise).
 
 # The judge bind-mounts a writable directory here; creating it keeps the image
 # usable when it is started without a mount (local experiments).
