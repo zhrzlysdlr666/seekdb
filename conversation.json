@@ -2,7 +2,7 @@
   "version": 2,
   "task": "MiniVectorDB — 2026 OceanBase 数据库大赛 round 2（题目 600081）",
   "material_summary": {
-    "scope": "本文件对应参赛版本 commit 93c52d0f1c8d455f3d80131f4ddf28ed74d44eb6（分支 2026-competition-round2）。记录从「平台判 0 分、3 个用例失败」到「MySQL 正式用例通过、性能项有效」这一段的定位、验证与取舍。",
+    "scope": "本文件对应参赛版本 commit 81d4553（分支 2026-competition-round2），内容涵盖从「平台判 0 分、3 个用例失败」（ec9c00b4 / f02753f / 57df57c）到「MySQL 正式用例通过、性能项有效」（93c52d0f），再到本轮查询路径优化（81d4553）的完整过程。",
     "provenance": "experiments[*].result_output 为本机实际运行输出或平台提测记录原文，未改写数值；标注「会话早期实测」的两条来自当时终端输出、未另存日志，其余可按 command 复跑。",
     "division_of_labor": "学生负责目标设定、验收顺序、环境与风险约束，以及在看到结果后的取舍确认；技术方案设计、编码、实验执行由 agent 完成。本材料不把 agent 的解释算作学生理解，逐条用 attribution 字段标注归属。",
     "what_is_verbatim": "user_prompts 中 content_type=verbatim 的两条为原始消息逐字文本；content_type=paraphrase 的一条是任务交接长文的要点复述，已标注。",
@@ -183,6 +183,33 @@
       "interpretation": "功能准入首次通过、性能项有效；Prompt 项被判无效，说明上一版材料没有形成可核验的证据链（只有结论性问答，没有任何实测输出）。这是本文件重写的直接原因。",
       "attribution": "平台判定；agent 归因",
       "next_step": "补入真实实验输出后重新提测"
+    },
+    {
+      "id": "exp-10",
+      "question": "带过滤的 TopK 是否必须扫全表？加速后的结果和扫描一致吗？",
+      "command": "python idx_equiv.py（TRIALS=300，两条引擎分别开/关 VECTORDB_NO_EQ_INDEX，逐字节比对响应）",
+      "result_output": "trials=300 mismatches=0；单查询对照：过滤查询 3.29 ms → 0.87 ms，无过滤查询 26.27 ms → 25.84 ms（不变）",
+      "interpretation": "把首个 `col = 常量` 条件改走等值桶，只对首个条件生效——因为 _passes 从左到右短路，用后面的条件收窄会跳过前面条件本该抛出的类型错误。差分测试里插入了 INSERT/UPDATE/DELETE 与 ROLLBACK，确认桶缓存在表版本变化后不会读到旧值。",
+      "attribution": "agent 设计、实现与验证",
+      "next_step": "确认无过滤查询才是耗时主体，转而解决距离计算本身"
+    },
+    {
+      "id": "exp-11",
+      "question": "无过滤 TopK 的瓶颈在扫描还是距离计算？能不能把 numpy 带进镜像？",
+      "command": "python bench_official.py 与 VECTORDB_NO_NUMPY=1 各跑一轮；numpy 以离线 wheel 方式随仓库提交（sha256 fd83c012…ac6249）",
+      "result_output": "numpy: write_s 2.513 / query_s 3.188 / restart_s 0.915；stdlib: write_s 2.632 / query_s 13.740 / restart_s 0.678（同为 10000 行返回、重启后末行 9999 正确）",
+      "interpretation": "过滤查询优化后总耗时几乎不动，说明主体是 10k 次距离计算而不是扫描；纯标准库每次查询约 2.4 µs/行（math.dist 每次调用都要把 array 展开成 list），numpy 路径快 4.3 倍。构建机不能联网（上一次 57df57c 装 numpy 直接构建失败），因此把 16.5 MB 的 cp312 manylinux wheel 放进仓库，用 --no-index 离线安装；安装失败也不影响启动，import 失败即回退 math.dist。",
+      "attribution": "agent 测量与实现",
+      "next_step": "镜像构建成功与否只能靠平台反馈，因此保留完整回退路径，并把它作为当日第一次提交去验证"
+    },
+    {
+      "id": "exp-12",
+      "question": "当天还能不能再提一次，把新材料送上去？",
+      "command": "node ob_submit_debug.js（打开提测弹窗填表并点击提交，抓取 toast 与接口返回）",
+      "result_output": "MSG: \"本队今日已用完该加赛赛题的提测次数\"；POST commitTestPlatformTaskRecord → code 500, message 同上",
+      "interpretation": "额度按队按天计算，当天 2 次已用完（11:01 f02753f、12:36 93c52d0f），新材料只能次日提交。此前脚本只打印页面尾部文本，把这条 toast 漏掉了，误判成「未知失败」；已改为同时读 .ant-message 并在识别到「已用完」时立即退出，避免空转重试。",
+      "attribution": "agent 排查；student 要求「拿分之前不要停」，因此把次日提交排成脚本化流程",
+      "next_step": "次日先提交含 numpy 的 81d4553，若准入不过再退回只改材料的 474b9e2f"
     }
   ],
   "retrospective": {
@@ -190,12 +217,15 @@
     "decision_2": "镜像不装 numpy：测量显示查询会慢 3.3 倍，但构建期不能联网，装了直接 8 秒失败、连准入都进不去；在「确定能跑」和「可能更快」之间选前者。",
     "decision_3": "checkpoint 阈值从固定 16 MiB 改为 max(16 MiB, snapshot_bytes)：固定阈值的隐含假设是「快照远小于阈值」，一旦数据量超过它就变成每批都全量重写，132.8 s 的写入里绝大部分是这次写放大。",
     "decision_4": "聚合与 ALTER 选择稳定报错而不是尽力实现：题面明确列为不要求，且要求不支持的语句返回约定错误，静默执行反而是错。",
+    "decision_5": "把 numpy 以 wheel 形式随仓库提交，而不是再赌一次构建期联网：上一次 57df57c 就是这么挂的，8 秒失败、连用例都没跑到。离线安装即使失败，最坏结果也只是回到 stdlib 路径，不会让准入失败——用「上限更高、下限不变」的方式承担风险。",
+    "decision_6": "等值索引只对首个条件生效，且只在有 ORDER BY 时启用：前者保证错误抛出顺序与全表扫描一致，后者避开「未指定 ORDER BY 按集合比较」的不确定输出。",
     "what_generalizes": "「本地全绿不等于平台通过」在带进程边界的评测里是通用的：驱动读取方式、flush 时机、退出码都算协议的一部分；同一批数据喂两条路径的对照实验，比任何单路径性能数字都更能说明取舍是否安全。"
   },
   "limitations": [
     "学生侧陈述只覆盖真实下达的目标、验收顺序与材料真实性选择；内核实现与实验执行由 agent 完成，本材料不把 agent 的解释算作学生理解。",
     "exp-07、exp-08 的耗时来自会话早期终端输出，未保存原始日志；复测口径见 exp-06 与 exp-05。",
     "所有测量在 Windows + CPython 3.12 上完成，判题环境为 Linux x86_64 容器，绝对耗时不可直接对比，仅用于同机对照。",
+    "本机没有 Docker，无法验证镜像构建本身；numpy 的离线安装只做了 wheel 完整性校验（sha256、cp312 manylinux 标签、无 Requires-Dist），实际能否在 python:3.12-slim 里装成只能看平台反馈，因此代码保留了 math.dist 回退路径。",
     "性能指标 E=231.519603 由平台给出，本次未取得排行榜其他选手的同口径数值，尚不能据此判断相对名次。",
     "本文件不含密钥、令牌或账号信息；路径与仓库凭据已脱敏。"
   ]
