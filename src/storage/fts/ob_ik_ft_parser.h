@@ -31,9 +31,6 @@ namespace storage
 {
 class ObFTDictHub;
 
-// Token cache slot; defined in the parser's translation unit.
-class ObIKTokenCacheEntry;
-
 class ObIKFTParser final : public ObITokenIterator
 {
 public:
@@ -43,11 +40,12 @@ public:
         coll_type_(ObCollationType::CS_TYPE_INVALID),
         ctx_(nullptr),
         hub_(hub),
-        cache_entry_(nullptr),
         segmenter_cnt_(0),
         dict_main_(nullptr),
         dict_quan_(nullptr),
-        dict_stop_(nullptr)
+        dict_stop_(nullptr),
+        ik_cache_slot_(-1),
+        ik_cache_cursor_(0)
   {
     for (int64_t i = 0; i < SEGMENTER_COUNT; ++i) {
       seg_arr_[i] = nullptr;
@@ -62,10 +60,6 @@ public:
                      int64_t &word_len,
                      int64_t &char_cnt,
                      int64_t &word_freq) override;
-
-  // Non-null enables recording the produced token stream into the given cache
-  // slot.  The slot is only published once the whole text has been consumed.
-  void set_cache_entry(ObIKTokenCacheEntry *entry) { cache_entry_ = entry; }
 
   VIRTUAL_TO_STRING_KV(K(is_inited_));
 
@@ -88,8 +82,6 @@ private:
 
   void reset();
 
-  void record_token(const char *word, const int64_t word_len, const int64_t char_cnt);
-
 private:
   static constexpr int SEGMENT_LIMIT = 1000;
   // IK parser always owns at most 4 segmenters (letter/quantifier/cjk/surrogate).
@@ -105,13 +97,18 @@ private:
   // used to pay four list node allocations just to iterate four pointers.
   ObIIKProcessor *seg_arr_[SEGMENTER_COUNT];
   int64_t segmenter_cnt_;
-  // Per-thread cache slot owned by ObIKFTParserDesc::segment(), may be null.
-  ObIKTokenCacheEntry *cache_entry_;
 
   // Borrowed from ObFTDictHub, shared by all parsers and must not be freed here.
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;
+
+  // Replayed token stream cache (see ob_ik_ft_parser.cpp).  ik_cache_slot_ is
+  // the index of the per thread slot this parser is serving from, or -1 when
+  // the text has to be segmented.  ik_cache_cursor_ is the position inside the
+  // replayed stream.
+  int32_t ik_cache_slot_;
+  int32_t ik_cache_cursor_;
 
   DISABLE_COPY_ASSIGN(ObIKFTParser);
 };
