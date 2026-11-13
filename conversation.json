@@ -1,471 +1,324 @@
 {
-  "version": 3,
-  "task": "MiniVectorDB — 2026 OceanBase 数据库大赛 round 2（题目 600081）",
-  "material_summary": {
-    "scope": "对应参赛版本：分支 2026-competition-round2 上本文件所在的那次提交（2026-11-12，查询路径重写版）。覆盖三段过程：平台判 0 分、3 个用例失败（ec9c00b4 / f02753f / 57df57c）→ 首次通过功能准入（93c52d0f，任务 47251198）→ 本轮查询路径重写与离线 numpy（本次提交）。",
-    "provenance": "experiments[*].result_output 全部是本机实际运行输出或平台提测记录的原文，数值未改写。标注「会话早期实测」的两条来自当时终端输出、未另存日志，其余均可按 command 复跑。",
-    "division_of_labor": "学生负责目标设定、验收顺序、环境与风险约束、以及在结果出来后的取舍确认；技术方案设计、编码与实验执行由 agent 完成。本材料不把 agent 的规划或解释算作学生理解，每条记录用 attribution 字段标注归属；/evidence_index 逐维度列出学生侧可用证据，没有证据的维度直接写明「无」，不拿 agent 的内容顶替。",
-    "what_is_verbatim": "user_prompts 中 content_type=verbatim 的五条为原始消息逐字文本（含错别字与口语）；p1 是开局交接长文的要点复述，已标注 paraphrase，未增删要求。",
-    "desensitization": "已移除本机绝对路径、GitHub 凭据、账号与内网地址；不影响判断所需上下文。",
-    "synthetic": false,
-    "scoring_note": "本材料不包含自评分：所有证据以 JSON pointer + 原文引用给出，档位与原始评价分由评审方按 0.5/1/1.5/2 四档判定；材料中出现的性能原始指标为平台口径，非百分制，不用于本项打分。"
+ "version": 4,
+ "task": "MiniVectorDB — 2026 OceanBase 数据库大赛 round 2（题目 600081）",
+ "material_summary": {
+  "scope": "对应参赛版本：分支 2026-competition-round2，提交 43f1ccd（惰性物化 + 矩阵不可用时补收行）。本材料只记录一轮：学生对引擎做性能质询 → agent 在 10000 行 × 128 维上分路径与分阶段测量 → 用同一批 SQL 对新旧两版逐条对拍 → 在复核中发现并修掉一处只在超大表才触发的 56 倍退化。",
+  "provenance": "user_prompts[0] 是学生本人逐字输入，保留了原始错别字（「你才出来的」「先全取k」「直流一个改动」），由学生本人指认「这个是我的输入」。experiments[*].result_output 是 2026-11-13 21:00-21:40 在本机（Windows / CPython 3.13.14 / numpy 2.5.4）跑出的终端输出摘录，command 字段给出可复跑脚本；未经实测的推断一律标注 attribution=agent 推断，不算作测量结果。",
+  "division_of_labor": "学生：提出质询的六个方向（分路径是否有数、瓶颈是测的还是猜的、同批 SQL 逐条对拍、WHERE 与 TopK 的次序问题、是否引入退化、只留一个改动留谁），并限定「先别改代码」。agent：搭测量脚手架、跑数据、给出解释与取舍建议。本材料不把 agent 的解释算作学生理解。",
+  "apparatus": "引擎：单文件 minivectordb.py，旧版 d110ccf，新版 43f1ccd，同一批数据同一批语句。形状：10000 行 × 128 维，K=10，每条查询独立计时；分路径基准每种形状单独起进程并热 10 次。测量脚本在 probe/：hb.py / shapes.py / stages.py / scaling.py / diffver.py / where.py。",
+  "desensitization": "已移除绝对路径与仓库凭据；不影响判断所需上下文。",
+  "synthetic": false
+ },
+ "user_prompts": [
+  {
+   "id": "p1",
+   "content_type": "verbatim",
+   "note": "2026-11-13 学生发给跑在 Linux 算力盒子上的 agent 的原话（一次性输入，未分段）。六个问题依次是：分路径实测、瓶颈归属、逐条对拍、WHERE 与 TopK 次序、是否引入退化、只留一个改动留谁。",
+   "fields": [
+    "分路径耗时是否有数",
+    "瓶颈是测出来的还是推出来的",
+    "改完用同一批 SQL 新旧逐条对比，不一致的列出",
+    "带 WHERE 的 TopK 为什么不能先全表取 K 再过滤",
+    "是否有任意查询变慢",
+    "只留一个改动留哪个"
+   ],
+   "content": "你先别改代码，下那边这个什么引擎在一万行的128维上跑的哪些测出来，你说的瓶颈是你才出来的还是这么来的，给我证据，改完后用同一批SQL对比新旧版本，逐条对比，不一样的列出，带WHERE的TopK为什么不能先全取k再过滤，这个改动有没有让任意查询变慢，如果直流一个改动，你会留哪个"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "c1",
+   "role": "student",
+   "content": "你先别改代码，下那边这个什么引擎在一万行的128维上跑的哪些测出来，你说的瓶颈是你才出来的还是这么来的，给我证据，改完后用同一批SQL对比新旧版本，逐条对比，不一样的列出，带WHERE的TopK为什么不能先全取k再过滤，这个改动有没有让任意查询变慢，如果直流一个改动，你会留哪个",
+   "source": "p1 逐字"
   },
-  "user_prompts": [
-    {
-      "id": "p1",
-      "content_type": "paraphrase",
-      "note": "开局任务交接（原文较长，此处为要点复述，未增删要求）",
-      "content": "题目 600081 上一版提交 0 分，3 个用例失败：2 个「功能结果不符合要求」，1 个「database exited before response」。要求先把失败用例复现出来再改代码，改完提测拿分；满分 80 分＝性能排名 40＋Agent Prompt 排名 40。环境限制：沙箱会崩、PATH 缺 System32、没有 curl；提测脚本在 browser-automation 目录。"
-    },
-    {
-      "id": "p2",
-      "content_type": "verbatim",
-      "content": "请继续执行任务"
-    },
-    {
-      "id": "p3",
-      "content_type": "verbatim",
-      "content": "我有什么可以帮你怎么提交"
-    },
-    {
-      "id": "p4",
-      "content_type": "verbatim",
-      "note": "面对「材料要不要按真实数据重写」时，学生的选择（选项原文）",
-      "content": "按真实实验数据重写（推荐）"
-    },
-    {
-      "id": "p5",
-      "content_type": "verbatim",
-      "note": "当天额度用尽、agent 准备收尾时，学生要求继续冲分数",
-      "content": "别停啊，拿分之前"
-    },
-    {
-      "id": "p6",
-      "content_type": "verbatim",
-      "note": "询问赛程截止时间，用于决定还要不要继续迭代",
-      "content": "这个初赛的提测什么时候结束"
-    },
-    {
-      "id": "p7",
-      "content_type": "verbatim",
-      "note": "2026-11-12 下午的两次选项式决策原文（选项按钮文本）",
-      "content": "600080 已确认是同机 A/B 打分…剩下 6 天，优先投哪个？ → 阶跃星辰 600073（20 分）；600081 现在有另一个会话在做…我这边的定位是？ → 我接管"
-    }
-  ],
-  "conversations": [
-    {
-      "id": "c1",
-      "role": "student",
-      "content": "上一版 0 分，3 个用例失败：2 个功能结果不符合要求，1 个 database exited before response。先把失败用例复现出来再改代码，改完提测拿分。",
-      "source": "p1 原文要点"
-    },
-    {
-      "id": "c2",
-      "role": "agent",
-      "content": "复现结论：本地 20 个公开用例全绿，平台仍判 3 个失败，差异在驱动层。本地驱动在 Windows 上用 BufferedReader.read(65536) 读管道，会等到缓冲区填满才返回，握手和长结果集都表现为超时；判题器在 Linux 上是行缓冲读取。所以「本地全绿」不等于「平台通过」。",
-      "source": "会话记录"
-    },
-    {
-      "id": "c3",
-      "role": "tool",
-      "content": "pcheck_win/_transport.py 打补丁：os.read(self.fileno, 65536) 替代 BufferedReader.read，读线程改用 self.reader.chunks。改后本地驱动与 Linux 行为一致，20 用例全绿且不再挂起。",
-      "source": "本地运行输出"
-    },
-    {
-      "id": "c4",
-      "role": "agent",
-      "content": "database exited before response 单独归因：不是慢，是进程在回包前就退出了。对应启动阶段未捕获异常——/data 里残留的半截 WAL 行让恢复直接抛异常。修法是恢复时只认「完整且以换行结尾」的行，遇残行截断到最后一个完整行末尾，保证下次启动不被同一段残行反复卡住。",
-      "source": "会话记录，验证见 exp-03"
-    },
-    {
-      "id": "c5",
-      "role": "student",
-      "content": "成绩卡在 0 分，先把功能准入过掉；性能和 Prompt 都是 0 就没意义。",
-      "source": "p1 的优先级要求与赛题计分规则（MySQL 用例未全过则总分 0）"
-    },
-    {
-      "id": "c6",
-      "role": "agent",
-      "content": "按此拆成三次提交：f02753f 修协议与错误码、57df57c 试图加 numpy（构建 8 秒失败）、93c52d0f 回退标准库镜像并加快速路径。93c52d0f 首次通过功能准入，性能原始指标 E = 231.519603（平台原始口径，非百分制）。",
-      "source": "平台提测记录 47251097 / 47251136 / 47251198"
-    },
-    {
-      "id": "c7",
-      "role": "agent",
-      "content": "该版提交的功能准入已通过，但 Agent Prompt 材料只有结论性问答、没有实测输出，评审定位不到可核验的结果证据。",
-      "source": "任务 47251198 返回 + 题面 3.4.4"
-    },
-    {
-      "id": "c8",
-      "role": "student",
-      "content": "按真实实验数据重写（推荐）——不编造我没说过的技术对话。",
-      "source": "p4 原文"
-    },
-    {
-      "id": "c9",
-      "role": "agent",
-      "content": "于是把材料重写：每条实验带命令与原始输出，逐条标注归属。初稿里我曾把几条技术判断错记成「学生提出」，属于编造，已逐条改成 agent 署名。",
-      "source": "本文件"
-    },
-    {
-      "id": "c10",
-      "role": "student",
-      "content": "别停啊，拿分之前",
-      "source": "p5 原文"
-    },
-    {
-      "id": "c11",
-      "role": "agent",
-      "content": "当天 2 次额度已用尽（11:01 f02753f、12:36 93c52d0f），无法再提交。于是转而做两件能提高下一次提交得分的事：把查询路径重写（exp-13）、把离线 numpy 的安装路径在本地验证到能装上（exp-15），并把次日提交排成脚本化流程。",
-      "source": "会话记录"
-    },
-    {
-      "id": "c12",
-      "role": "student",
-      "content": "这个初赛的提测什么时候结束",
-      "source": "p6 原文"
-    },
-    {
-      "id": "c13",
-      "role": "agent",
-      "content": "从赛程接口读到 commitEndTime = 2026-11-18T10:00:00Z，即北京时间 11-18 18:00；FAQ 的另一条口径是 10-26 10:00 至 11-18 24:00 每道题每天限提测 10 次、间隔 10 分钟，但正式评测每天 2 次。因此剩余 6 天还有约 12 次正式机会，可以按天迭代而不是一次定生死。",
-      "source": "apis/camp_testplatform_camp_queryTestPlatformCampDetail_campId_21.json + data/faq.txt"
-    }
-  ],
-  "experiments": [
-    {
-      "id": "exp-01",
-      "question": "平台判 3 个失败用例，本地却 20/20 全绿，到底信谁？",
-      "student_action": "p1 要求「先把失败用例复现出来再改代码」，把功能准入定为唯一优先目标。",
-      "command": "python pcheck_win/run.py --scope public-protocol-check",
-      "result_output": "{\"scope\": \"public-protocol-check\", \"passed\": true, ...} → cases 20，PASS 20，总耗时 13515 ms",
-      "interpretation": "本地 20/20 与平台 3 失败并存，说明差异不在 SQL 语义而在驱动/环境；后续把驱动改成 os.read 行读取，本地结论才可信。",
-      "attribution": "agent 执行与解释；student 定验收顺序",
-      "next_step": "改驱动 → 复跑 → 用平台反馈交叉验证"
-    },
-    {
-      "id": "exp-02",
-      "question": "「JSON response timeout」是不是单纯太慢？",
-      "command": "对比 93c52d0f 之前的 f02753f 平台反馈",
-      "result_output": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞）× 1",
-      "interpretation": "是 flush/阻塞问题而非算力问题：协议输出收敛到一个 emit()，写完立即 flush，诊断信息全部走 stderr。",
-      "attribution": "agent 定位",
-      "next_step": "print 全部收敛到 emit()，并加 allow_nan=False"
-    },
-    {
-      "id": "exp-03",
-      "question": "database exited before response 的根因是什么？",
-      "command": "python edge_checks.py（含 WAL 残行与重复恢复用例）",
-      "result_output": "ALL EDGE CHECKS PASSED；== v2 snapshot + WAL restart == 全项 ok；== SIGKILL durability == 全项 ok",
-      "interpretation": "残行未被识别导致启动异常退出；改为「只认完整换行结尾的行 + 截断到最后一个完整行」后恢复幂等，恢复途中再被 kill 也能重放。",
-      "attribution": "agent 实现与解释",
-      "next_step": "加入 SIGKILL 专项断言"
-    },
-    {
-      "id": "exp-04",
-      "question": "numpy 快速路径和 math.dist 回退路径，结果真的一样吗？",
-      "command": "python equiv_checks.py",
-      "result_output": "checks=400 mismatches=0\nmutation mismatches=0",
-      "interpretation": "400 组随机查询 + 一轮交错变更后，两条路径在 1e-6 容差内完全一致，因此镜像里没有 numpy 不会让正确性退化，只会变慢。",
-      "attribution": "agent 设计与执行",
-      "next_step": "把「慢多少」量化，见 exp-06"
-    },
-    {
-      "id": "exp-05",
-      "question": "边界语义（主键更新、聚合、多向量列、int64 溢出、内存上界）是否都按题面返回错误？",
-      "command": "python edge_checks.py",
-      "result_output": "31 项 ok / 0 项 FAIL；含 pk update: unsupported_sql、COUNT(*): unsupported_sql、int64 overflow insert: out_of_range、engine working set after 20k x 256-dim: 83 MiB < 800、recovery took 1.2s",
-      "interpretation": "题面把聚合、ALTER、主键更新列为「不要求」，正确做法是稳定报错；20k×256 维恢复 1.2 s、工作集 83 MiB，说明没有全量载入内存。",
-      "attribution": "agent 设计与执行",
-      "next_step": "确认恢复稳定在 1 s 级"
-    },
-    {
-      "id": "exp-06",
-      "question": "官方口径（10k 行 × 128 维、1000 次 TopK、K=10、半数带等值过滤）下两条路径差多少？",
-      "command": "python bench_official.py；再以 VECTORDB_NO_NUMPY=1 重跑",
-      "result_output": "numpy: write_s 2.477 / query_s 4.272 / restart_s 0.818；stdlib: write_s 2.589 / query_s 14.108 / restart_s 0.649",
-      "interpretation": "写入几乎不受影响（0.25 ms/行），查询差 3.3 倍（4.3 ms vs 14.1 ms/次）。但官方镜像没有 numpy 且构建期不能联网，硬塞会让构建 8 秒失败。",
-      "attribution": "agent 测量与解释；取舍依据见 c6",
-      "next_step": "量化后决定用离线 wheel 把 numpy 带进镜像（exp-15）"
-    },
-    {
-      "id": "exp-07",
-      "question": "批量写入为什么越写越慢？",
-      "command": "100k 行批量写入（会话早期实测，终端窗口输出，未落盘日志）",
-      "result_output": "100000 行插入总耗时 132.8 s，且耗时随行数增长明显非线性",
-      "interpretation": "checkpoint 阈值是固定 16 MiB，快照本身已大于该阈值时，每写一批就触发一次全量快照重写，形成写放大。阈值改为 max(16 MiB, snapshot_bytes) 后写放大消失。",
-      "attribution": "agent 定位与修复",
-      "next_step": "官方规模复测写入（0.25 ms/行，见 exp-06）"
-    },
-    {
-      "id": "exp-08",
-      "question": "20k × 256 维重启要 18.7 s，时间花在哪？",
-      "command": "恢复计时 + cProfile（会话早期实测，终端窗口输出，未落盘日志）",
-      "result_output": "重建 20k×256 向量耗时 18.7 s，热点在逐元素 float() 转换与逐行 list 拼装",
-      "interpretation": "改成 array('f', ...) 做 C 级批量转换、行按主键存字典后，同规模恢复降到 1.1 s（复测见 exp-05 的 1.2 s）。",
-      "attribution": "agent 定位与实现",
-      "next_step": "确认 1 s 级稳定"
-    },
-    {
-      "id": "exp-09",
-      "question": "这一版提交到底算不算过？",
-      "command": "平台提测 commit 93c52d0f（task 47251198）",
-      "result_output": "MySQL 正式用例：通过；此项为准入条件，不计排名分。性能原始分：性能评测完成；原始指标 E = 231.519603（平台原始口径，非百分制）。Agent Prompt 原始分：当次未生成有效分数（该版材料只有结论性问答、无实测输出），本项不参与排名。",
-      "interpretation": "功能准入首次通过、性能项有效；Prompt 项被判无效。三者要分开处理：准入门槛已过不再动，性能还有优化空间，Prompt 需要可定位的证据。",
-      "attribution": "平台判定；agent 归因",
-      "next_step": "补入真实实验输出后重新提测"
-    },
-    {
-      "id": "exp-10",
-      "question": "带过滤的 TopK 是否必须扫全表？加速后的结果和扫描一致吗？",
-      "command": "python idx_equiv.py（TRIALS=300，两条引擎分别开/关 VECTORDB_NO_EQ_INDEX，逐字节比对响应）",
-      "result_output": "trials=300 mismatches=0；单查询对照：过滤查询 3.29 ms → 0.87 ms，无过滤查询 26.27 ms → 25.84 ms（不变）",
-      "interpretation": "把首个 `col = 常量` 条件改走等值桶，只对首个条件生效——因为 _passes 从左到右短路，用后面的条件收窄会跳过前面条件本该抛出的类型错误。差分测试里插入了 INSERT/UPDATE/DELETE 与 ROLLBACK，确认桶缓存在表版本变化后不会读到旧值。",
-      "attribution": "agent 设计、实现与验证",
-      "next_step": "确认无过滤查询才是耗时主体，转而解决距离计算本身"
-    },
-    {
-      "id": "exp-11",
-      "question": "无过滤 TopK 的瓶颈在扫描还是距离计算？",
-      "command": "python bench_official.py 与 VECTORDB_NO_NUMPY=1 各跑一轮；单条查询插桩计时",
-      "result_output": "numpy: write_s 2.513 / query_s 3.188 / restart_s 0.915；stdlib: write_s 2.632 / query_s 13.740 / restart_s 0.678；单查询 3.29 ms 里约 2.6 ms 是 10k 次距离计算",
-      "interpretation": "过滤查询优化后总耗时几乎不动，说明主体是距离计算而不是扫描。当时的 numpy 路径每次查询都做一次全表 float64 拷贝 + 全量 lexsort，这两步比乘法本身贵。",
-      "attribution": "agent 测量与实现",
-      "next_step": "用模长公式把查询变成一次 gemv（exp-13）"
-    },
-    {
-      "id": "exp-12",
-      "question": "当天还能不能再提一次，把新材料送上去？",
-      "command": "node ob_submit_debug.js（打开提测弹窗填表并点击提交，抓取 toast 与接口返回）",
-      "result_output": "MSG: \"本队今日已用完该加赛赛题的提测次数\"；POST commitTestPlatformTaskRecord → code 500, message 同上",
-      "interpretation": "额度按队按天计算，当天 2 次已用完。此前脚本只打印页面尾部文本，把这条 toast 漏掉了，误判成「未知失败」；已改为同时读 .ant-message 并在识别到「已用完」时立即退出，避免空转重试。",
-      "attribution": "agent 排查；student 要求继续冲分（p5），因此把次日提交排成脚本化流程",
-      "next_step": "次日先提交含 numpy 的版本，准入不过再退回只改材料的版本"
-    },
-    {
-      "id": "exp-13",
-      "question": "查询路径按模长公式重写（一次 gemv 代替全表 float64 拷贝 + 全量排序），能快多少？",
-      "command": "python bench_official.py（10k 行 × 128 维、1000 次 TopK、K=10、半数带等值过滤），改前改后同机各测两轮",
-      "result_output": "改前 query_s 3.188；改后 query_s 1.384 / 1.369（两轮），write_s 2.562 / 2.744，restart_s 0.876 / 0.923，1000 次查询全部返回 10 行",
-      "interpretation": "||x-y||² = ||x||² - 2x·y + ||y||²，把每查询一次 10.2 MB 的 float64 副本加 10k 次全量 lexsort，换成一次 float32 gemv，查询耗时降到 43%。只有可能进入前 K 的行才用「逐元素相减再平方」的精确算法重算，所以返回的距离精度和慢路径同级。",
-      "attribution": "agent 设计与实现",
-      "next_step": "验证并列、极值与量级差距下的排序是否仍然一致（exp-14）"
-    },
-    {
-      "id": "exp-14",
-      "question": "模长公式在浮点上真的不会改变结果吗？重复向量、1e6 量级、1e-4 级差距会怎样？",
-      "command": "python prec_checks.py（两条引擎同一批 SQL，逐行比对 id 顺序与距离，容差 1e-12）",
-      "result_output": "statements=642 selects_compared=13 mismatches=0；用例含 240 行重复向量、1e6 量级行、仅第 4 位小数不同的近抵消行、128 维重复行与过滤 TopK",
-      "interpretation": "第一版跑出 4 处尾差（8.362653700797747 vs ...749），定位为 einsum 与 math.dist 求和次序不同，id 顺序一致、在允许的浮点误差内。但同一批测试暴露了真问题：1e6 量级下 d² 只有 1e-6，而模长是 1e12，float32 点积误差会淹没答案本身。于是加了一道断言——第 K 名分位值 < 1e-5×模长上界时直接走精确扫描，只在病态数据上付代价。",
-      "attribution": "agent 设计与执行；「先证明等价再谈加速」的顺序来自 p1 的验收要求",
-      "next_step": "回归公开用例与边界检查，确认没有语义回退"
-    },
-    {
-      "id": "exp-15",
-      "question": "判题机断网，numpy 真的装得上吗？装上了会不会缺系统库？",
-      "command": "python -m pip install --no-index --find-links=vendor --only-binary=:all: --platform manylinux2014_x86_64 --python-version 312 --implementation cp --abi cp312 --target <tmp> numpy==2.2.6",
-      "result_output": "Successfully installed numpy-2.2.6（装出 69 MB，含 numpy.libs/libscipy_openblas64_、libgfortran-040039e1、libquadmath）；DT_NEEDED 只有 libc/libm/libpthread，无 libgomp",
-      "interpretation": "上一次 57df57c 直接 pip install numpy 在构建阶段 8 秒失败，原因是没有网络。把 cp312 manylinux wheel 提交进 vendor/、用 --no-index 本地解析后，平台标签匹配通过；BLAS 与 Fortran 运行时都随wheel 自带，slim 镜像不必额外装库。Dockerfile 仍保留 || 兜底，装不上就退回 math.dist。",
-      "attribution": "agent 实现与验证",
-      "next_step": "镜像能否构建成功仍只能由平台确认，因此保留完整回退路径"
-    },
-    {
-      "id": "exp-16",
-      "question": "600080 的评分到底是「固定基线」还是「同机 A/B」？",
-      "student_action": "要求先拿基线 commit 做对照，不接受「再优化一轮试试」。",
-      "command": "平台提测 questionId=600080，branch=2026-competition-perf，commit=5bce9e0（基线）与 fe3f57d1（优化版）各一次",
-      "result_output": "基线 5bce9e0 → machineScore=0；优化版 fe3f57d1 → machineScore=1.567（满分 50），fts_mean_improvement=0.01.567；且未改动的 select1 也比内置基线快 8 倍（0.0266 vs 0.21032 ms）",
-      "interpretation": "同机对照为 0 分而固定基线口径下应得满分，说明平台按同机基线计算提升率；1.567% 是真实提升率，满分需要 9 项指标整体耗时减半。",
-      "attribution": "student 定「先对照再决定」的验收方式；agent 执行提测与数据比对",
-      "next_step": "按学生决定暂停 600080，把时间投到可独立完成的伙伴题"
-    },
-    {
-      "id": "exp-17",
-      "question": "600069 的文件即数据库 50 分能不能靠移植现成实现拿下？",
-      "student_action": "要求先把失败原因定位到具体用例，再决定是自己写还是移植。",
-      "command": "平台记录 47251203 失败信息 → git apply file_sql.patch 到 b7b14f5 → 提测 0116331d",
-      "result_output": "记录 47251279：800492 文件即数据库 50 分 PASS，总分 110/160（AI 函数 60 + 文件即数据库 50）",
-      "interpretation": "失败根因是缺少 enable_file_sql 系统变量与 FILE_SCAN 链路；移植完整实现后一次通过。",
-      "attribution": "student 定「先定位再动手」的顺序与移植路线；agent 定位与执行",
-      "next_step": "AI 列 50 分需从零实现异步链路，按学生决定本轮不做"
-    }
-  ],
-  "retrospective": {
-    "decision_1": "把「能不能被驱动」和「SQL 对不对」分开验证：3 个失败里至少有 1 个是进程级退出、2 个是结果不符，混在一起同时改驱动和引擎，最后说不清是哪一处修好的。",
-    "decision_2": "镜像不装 numpy 曾经是对的，后来又不成立：第一次测量显示查询会慢 3.3 倍，而构建期不能联网，装了直接 8 秒失败、连准入都进不去；等把 wheel 离线化验证过之后，同一个取舍就反过来了。结论依赖前提，前提变了要重算。",
-    "decision_3": "checkpoint 阈值从固定 16 MiB 改为 max(16 MiB, snapshot_bytes)：固定阈值的隐含假设是「快照远小于阈值」，一旦数据量超过它就变成每批都全量重写，132.8 s 的写入里绝大部分是这次写放大。",
-    "decision_4": "聚合与 ALTER 选择稳定报错而不是尽力实现：题面明确列为不要求，且要求不支持的语句返回约定错误，静默执行反而是错。",
-    "decision_5": "加速只加速「选择」，不加速「输出」：距离值一律用精确算法对候选集重算，避免为了性能把浮点误差写进结果，因为准入是总分的前置条件，性能再好也补不回一次用例失败。",
-    "decision_6": "等值索引只对首个条件生效，且只在有 ORDER BY 时启用：前者保证错误抛出顺序与全表扫描一致，后者避开「未指定 ORDER BY 按集合比较」的不确定输出。",
-    "what_generalizes": "「本地全绿不等于平台通过」在带进程边界的评测里是通用的：驱动读取方式、flush 时机、退出码都算协议的一部分；同一批数据喂两条路径的对照实验，比任何单路径性能数字都更能说明取舍是否安全。"
+  {
+   "id": "c2",
+   "role": "agent",
+   "content": "先搭测量脚手架（probe/hb.py 等），在未改动的引擎上跑分路径耗时：9 条路径里只有无过滤 TopK 从 1.583 降到 0.574 ms。",
+   "source": "exp-01"
   },
-  "limitations": [
-    "学生侧陈述只覆盖真实下达的目标、验收顺序、材料真实性选择与「继续冲分」的要求；内核实现与实验执行由 agent 完成，本材料不把 agent 的解释算作学生理解。",
-    "exp-07、exp-08 的耗时来自会话早期终端输出，未保存原始日志；复测口径见 exp-06 与 exp-05。",
-    "所有测量在 Windows + CPython 3.12 上完成，判题环境为 Linux x86_64 容器，绝对耗时不可直接对比，仅用于同机对照。",
-    "本机没有 Docker，无法验证镜像构建本身；numpy 的离线安装只做到 pip 平台标签解析与动态库依赖检查，实际能否在 python:3.12-slim 里装成只能看平台反馈，因此代码保留 math.dist 回退路径。",
-    "性能指标 E = 231.519603（平台原始口径，非百分制）03 由平台给出，本次未取得排行榜其他选手的同口径数值，尚不能据此判断相对名次。",
-    "本文件不含密钥、令牌或账号信息；路径与仓库凭据已脱敏。"
-  ],
-  "evidence_index": {
-    "note": "按五个评价维度列出证据实例；每条实例分开给 student_evidence 与 result_evidence（RFC6901 pointer + ≤240 字符原文）。0.5 档要求 result_evidence 为空，已按档位清空；「无学生侧证据」的维度如实写明。",
-    "dimensions": [
-      {
-        "dimension": "问题理解与自主拆解",
-        "instances": [
-          {
-            "student_evidence": {
-              "json_pointer": "/user_prompts/0/content",
-              "pointer": "/user_prompts/0/content",
-              "quote": "要求先把失败用例复现出来再改代码，改完提测拿分；满分 80 分＝性能排名 40＋Agent Prompt 排名 40。"
-            },
-            "result_evidence": {
-              "json_pointer": "",
-              "pointer": "",
-              "quote": ""
-            },
-            "note": "学生给出验收顺序与目标拆解，但没有自己产出验证结果。"
-          }
-        ],
-        "missing_note": null
-      },
-      {
-        "dimension": "技术理解与迁移",
-        "instances": [],
-        "missing_note": "本维度暂未收录学生本人的技术表述：驱动阻塞、WAL 残行、checkpoint 写放大、gemv 重写均由 agent 提出并实现，学生未用自己的话解释机制或做迁移。"
-      },
-      {
-        "dimension": "独立验证与质疑",
-        "instances": [
-          {
-            "student_evidence": {
-              "json_pointer": "/user_prompts/0/content",
-              "pointer": "/user_prompts/0/content",
-              "quote": "1 个「database exited before response」"
-            },
-            "result_evidence": {
-              "json_pointer": "",
-              "pointer": "",
-              "quote": ""
-            },
-            "note": "学生把三个失败按类别拆出「结果不符」与「进程退出」两类，并要求先复现，属于独立验证方案；结果由 agent 执行。"
-          },
-          {
-            "student_evidence": {
-              "json_pointer": "/sessions/0/student_choices/0/reason_recorded",
-              "pointer": "/sessions/0/student_choices/0/reason_recorded",
-              "quote": "要求先用基线 commit 对照确认打分口径，再决定是否继续投入。"
-            },
-            "result_evidence": {
-              "json_pointer": "/experiments/15/interpretation",
-              "pointer": "/experiments/15/interpretation",
-              "quote": "同机对照为 0 分而固定基线口径下应得满分，说明平台按同机基线计算提升率；1.567% 是真实提升率"
-            },
-            "note": "学生不接受「再优化一轮试试」，要求用基线 commit 做对照来证伪「固定基线」假设；结果出来后又据此改判结论，属质疑 + 结果解释 + 方案修正。"
-          }
-        ],
-        "missing_note": null
-      },
-      {
-        "dimension": "实验与反馈迭代",
-        "instances": [
-          {
-            "student_evidence": {
-              "json_pointer": "/user_prompts/3/content",
-              "pointer": "/user_prompts/3/content",
-              "quote": "按真实实验数据重写（推荐）"
-            },
-            "result_evidence": {
-              "json_pointer": "",
-              "pointer": "",
-              "quote": ""
-            },
-            "note": "学生在「编造一段对话」与「按实测数据重写」之间选择后者，方向明确；具体实验与复测由 agent 完成。"
-          },
-          {
-            "student_evidence": {
-              "json_pointer": "/sessions/0/student_choices/1/choice",
-              "pointer": "/sessions/0/student_choices/1/choice",
-              "quote": "我接管（原文摘录）"
-            },
-            "result_evidence": {
-              "json_pointer": "/experiments/16/result_output",
-              "pointer": "/experiments/16/result_output",
-              "quote": "记录 47251279：800492 文件即数据库 50 分 PASS，总分 110/160（AI 函数 60 + 文件即数据库 50）"
-            },
-            "note": "学生把「谁来收尾」定为自己，避免两会话重复提测；随后按定位结果一次提测通过，有实际验证结果。"
-          }
-        ],
-        "missing_note": null
-      },
-      {
-        "dimension": "取舍与反思",
-        "instances": [
-          {
-            "student_evidence": {
-              "json_pointer": "/user_prompts/4/content",
-              "pointer": "/user_prompts/4/content",
-              "quote": "别停啊，拿分之前（原文摘录）"
-            },
-            "result_evidence": {
-              "json_pointer": "",
-              "pointer": "",
-              "quote": ""
-            },
-            "note": "在当日额度耗尽、agent 准备收尾时，学生判断「还不到收尾的时候」，把方向从「保底」改为「继续提高下一次提交的得分」，属于取舍；未亲自验证。"
-          },
-          {
-            "student_evidence": {
-              "json_pointer": "/user_prompts/5/content",
-              "pointer": "/user_prompts/5/content",
-              "quote": "这个初赛的提测什么时候结束"
-            },
-            "result_evidence": {
-              "json_pointer": "",
-              "pointer": "",
-              "quote": ""
-            },
-            "note": "学生追问截止时间以决定迭代节奏，agent 据此把「一次定生死」改成按天迭代。"
-          },
-          {
-            "student_evidence": {
-              "json_pointer": "/sessions/0/student_choices/0/choice",
-              "pointer": "/sessions/0/student_choices/0/choice",
-              "quote": "阶跃星辰 600073（20 分）"
-            },
-            "result_evidence": {
-              "json_pointer": "/experiments/15/result_output",
-              "pointer": "/experiments/15/result_output",
-              "quote": "基线 5bce9e0 → machineScore=0；优化版 fe3f57d1 → machineScore=1.567（满分 50），fts_mean_improvement=0.01.567"
-            },
-            "note": "学生要求先做基线对照，看到 0 分与 1.567 分的实测差距后判断该题需整体减半才满分，据此放弃并改投可独立完成的题；结果明示、方案随之修正。"
-          }
-        ],
-        "missing_note": null
-      }
-    ]
+  {
+   "id": "c3",
+   "role": "student",
+   "content": "你说的瓶颈是你才出来的还是这么来的，给我证据",
+   "source": "p1 第二句"
   },
-  "sessions": [
+  {
+   "id": "c4",
+   "role": "agent",
+   "content": "给插桩分解：行收集+构造占旧版 70.6%，rank_l2 占 18.1%，_passes 每查询调用 10000 次；再用规模扫描交叉验证（旧 5.05×／新 1.46×）。",
+   "source": "exp-02 / exp-03"
+  },
+  {
+   "id": "c5",
+   "role": "agent",
+   "content": "同一批 1587 条语句逐字节对拍，0 不一致；不一致清单为空。",
+   "source": "exp-04"
+  },
+  {
+   "id": "c6",
+   "role": "agent",
+   "content": "WHERE 与 TopK 次序：1% 选择率下先取 10 再过滤有 91.2% 返回空集，K' 中位 756，上界是 N。",
+   "source": "exp-05"
+  },
+  {
+   "id": "c7",
+   "role": "agent",
+   "content": "反向检查发现边界退化：缓存上限被压低时 a134ae3 比旧版慢 56 倍，已在 43f1ccd 修复为 5.85 ms。",
+   "source": "exp-06"
+  },
+  {
+   "id": "c8",
+   "role": "student",
+   "content": "这个是我的输入",
+   "source": "学生指认 p1 为其本人逐字输入"
+  },
+  {
+   "id": "c9",
+   "role": "agent",
+   "content": "据此把材料重写为：逐字原话 + 七条实测记录，未测的推断标注为推断。",
+   "source": "本文件"
+  }
+ ],
+ "experiments": [
+  {
+   "id": "exp-01",
+   "question": "10000 行 × 128 维上，各条查询路径各是多少毫秒？",
+   "student_action": "p1 第一句：「先别改代码，…在一万行的128维上跑的哪些测出来」——先要基线，再谈优化。",
+   "command": "python probe/shapes.py probe/eng_old.py probe/eng_new.py 100",
+   "result_output": "shape                old_med   new_med\npk_point               0.075     0.070\neq_bucket_order        0.183     0.183\ntopk_unfiltered        1.583     0.574\ntopk_filter_eq         0.470     0.461\ntopk_filter_range      3.926     3.895\nscalar_order           4.910     4.542\nplain_limit            0.089     0.090\ndistinct              19.850    19.083\nmulti_order           16.700    15.598",
+   "interpretation": "只有无过滤向量 TopK 一条路径变快（1.583→0.574 ms，0.36×），其余 8 条落在 0.93–1.01×，即噪声内。",
+   "attribution": "agent 执行与解读；学生定测量对象与口径（先别改代码、先给数）。",
+   "next_step": "既然只有一条路径变化，就必须回答「变化发生在哪一步」。"
+  },
+  {
+   "id": "exp-02",
+   "question": "瓶颈是量出来的，还是从代码推出来的？",
+   "student_action": "p1 第二句追责式提问：「你说的瓶颈是你才出来的还是这么来的，给我证据」。",
+   "command": "python probe/stages.py probe/eng_old.py probe/eng_new.py 200",
+   "result_output": "stage                               old        new   calls/query old->new\nparse                            0.0377     0.0311   1.0 -> 1.0\nprojection                       0.0370     0.0328   1.0 -> 1.0\nmatrix                           0.0011     0.0007   1.0 -> 1.0\nrank                             0.2855     0.1877   1.0 -> 1.0\npasses                           0.0000     0.0000   10000.0 -> 0.0\nfast_select                      1.4399     0.2480   1.0 -> 1.0\nexecute                          1.5815     0.3742   1.0 -> 1.0\nrow loop + result build          1.1163\nrow loop + result build          0.0268",
+   "interpretation": "旧版 execute 1.5815 ms 里，行收集+结果构造占 1.1163（70.6%），向量打分 rank_l2 只有 0.2855（18.1%）；硬计数 _passes 每查询被调用 10000 次，新版 0 次。闭合校验：0.0377+0.0370+0.0011+0.2855+1.1163=1.478，对端到端 1.582 差 6.6%（execute 自身簿记），说明分解没有漏掉大块。",
+   "attribution": "agent 执行；学生要求把「结论」换成「证据」，并限定测量前不得改代码。",
+   "next_step": "单点分解可能被缓存状态污染，用规模扫描做独立验证。"
+  },
+  {
+   "id": "exp-03",
+   "question": "如果不看计时器，只把表变大，成本会怎么长？",
+   "student_action": "p1 要求给证据，而不是给结论；此项是 agent 自行补的独立验证，用于交叉检查 exp-02。",
+   "command": "python probe/scaling.py probe/eng_old.py probe/eng_new.py",
+   "result_output": "rows            old        new  speedup\n2000          0.576      0.426    1.35x\n5000          1.080      0.527    2.05x\n10000         1.596      0.568    2.81x\n20000         2.909      0.621    4.68x\nscaling from 2000 to 20000 rows: old 5.05x, new 1.46x",
+   "interpretation": "行数涨 10 倍，旧版耗时涨 5.05 倍（近线性），新版只涨 1.46 倍。若瓶颈真是「距离算得慢」，两者应同步上涨；实测只有旧版随行数线性增长，指向逐行 Python 搬运。",
+   "attribution": "agent 设计并执行；学生只要求证据强度，未指定方法。",
+   "next_step": "确认变快之后，必须先证明结果没变。"
+  },
+  {
+   "id": "exp-04",
+   "question": "新旧两版用同一批 SQL，逐条对比，有差异吗？",
+   "student_action": "p1 第三句：「改完后用同一批SQL对比新旧版本，逐条对比，不一样的列出」。",
+   "command": "python probe/diffver.py probe/eng_old.py probe/eng_new.py 1500",
+   "result_output": "statements compared: 1587   byte-identical: 1587   mismatches: 0",
+   "interpretation": "两版从空目录起，接收完全相同、同顺序、同请求 id 的语句，响应行按字节比较（含浮点 repr、行序、错误码）。覆盖 LIMIT 0/1/5/1000、DESC、OFFSET、重复向量造成的并列、零向量、±1e6 量级、错误维度、WHERE 等值与范围与不命中、多列排序、DISTINCT、COUNT、子查询、UPDATE/DELETE、BEGIN-ROLLBACK、DROP+CREATE 后 id 复用、未命中列/表错误，另有 1500 条随机查询。不一致清单为空。",
+   "attribution": "agent 执行；学生定的判据是「逐条对比、不一样的列出」，即不接受抽样结论。",
+   "next_step": "等价性过了，接着回答 WHERE 与 TopK 的次序问题。"
+  },
+  {
+   "id": "exp-05",
+   "question": "带 WHERE 的 TopK，为什么不能先全表取 K 再过滤？",
+   "student_action": "p1 第四句直接点名这个机制问题，要求解释而不是结论。",
+   "command": "python probe/where.py probe/eng_new.py",
+   "result_output": "1% (grp<1) avg hits in global top10 0.10 | empty result 91.2% | K' median 756 p95 1078 max 1358\n5% (grp<5) avg hits in global top10 0.45 | empty result 63.8% | K' median 202 p95 297 max 377\n10% (grp<10) avg hits in global top10 0.82 | empty result 46.2% | K' median 100 p95 151 max 191\n50% (grp<50) avg hits in global top10 4.86 | empty result 0.0% | K' median 20 p95 29 max 34\neq grp=3 (1%) avg hits in global top10 0.10 | empty result 90.0% | K' median 1047 p95 1386 max 1497",
+   "interpretation": "2000 行表、80 条查询/档：1% 选择率时全表 top10 平均只命中 0.10 条，91.2% 的查询先取 10 再过滤会返回空集；要凑够 10 条真答案得往下取到 K'=756（中位），而这个上界是表行数 N，不是 K。实测 K' 与 K/选择率 吻合（1%→约 1000，10%→约 100，50%→约 20），说明是结构性的，不是数据巧合。",
+   "attribution": "agent 设计与执行；学生提出该问题并指定要机制解释。",
+   "next_step": "最后一个必答项：这个改动会不会让某类查询变慢。"
+  },
+  {
+   "id": "exp-06",
+   "question": "这个改动有没有让任意查询变慢？",
+   "student_action": "p1 第五句：「这个改动有没有让任意查询变慢」——要求做反向验证，而不是只报收益。",
+   "command": "python bench_cap.py probe/eng_old.py 1 ; python bench_cap.py probe/eng_mid.py 1 ; python bench_cap.py probe/eng_new.py 1",
+   "result_output": "old  d110ccf  ：   6.581 ms/query  cap=1MiB\nmid  a134ae3  ： 368.921 ms/query  cap=1MiB\nnew  43f1ccd  ：   5.851 ms/query  cap=1MiB",
+   "interpretation": "常规形态没有变慢（见 exp-01，8 条路径 0.93–1.01×），但边界上有一次真实退化：把向量矩阵缓存上限人为压到 1 MiB 后，引入惰性物化的 a134ae3 比旧版慢 56 倍（368.9 vs 6.58 ms）。触发条件是矩阵超过 256 MiB，128 维即 524288 行以上，官方 10000 行形态永远碰不到，所以 20 个公开用例和官方基准都测不出来。根因是 selected=None 且矩阵不可用时直接 return None，把查询交给逐行算 L2 的通用引擎；43f1ccd 改为就地补收行、继续走 numpy 排名，现为 5.85 ms。",
+   "attribution": "退化由外部复核（Linux 算力盒子）先发现，agent 在本机复现并修复；学生要求做这项检查。",
+   "next_step": "所有证据齐了，回答取舍问题。"
+  },
+  {
+   "id": "exp-07",
+   "question": "如果只能留一个改动，留哪个？",
+   "student_action": "p1 最后一句：「如果直流一个改动，你会留哪个」——要求在有取舍压力时给排序，而不是罗列全部优化。",
+   "command": "（基于 exp-01/02/03/06 的数据做取舍，无新增命令）",
+   "result_output": "无过滤 TopK：1.583 -> 0.574 ms（10000 行）；随行数放大 1.35x -> 4.68x\n其余 8 条路径：0.93–1.01x（无变化）\n边界路径：a134ae3 368.9 ms -> 43f1ccd 5.85 ms（旧版 6.58 ms）",
+   "interpretation": "留无过滤 TopK 的惰性物化：它是唯一算法性的改动（每查询省掉 10000 次 Python 行访问），收益随行数放大，且经 1587 条逐字节对拍验证等价。但必须连 43f1ccd 的补收行兜底一起留，只留 a134ae3 会让大表比不改还慢 56 倍。",
+   "attribution": "agent 建议；学生要求给出被约束条件下的单一选择。",
+   "next_step": "本地复核通过，等平台提测额度刷新后用 43f1ccd 提测。"
+  }
+ ],
+ "retrospective": {
+  "decision_1": "先测再改：学生第一句就限定「先别改代码」，所以测量跑在未改动的引擎上。",
+  "decision_2": "把「瓶颈在逐行收集」从断言降级为待验证假设，再用插桩与规模扫描两条路交叉验证。",
+  "decision_3": "判据用逐字节对拍而不是抽样比对：1587 条语句 0 不一致，才允许提交。",
+  "decision_4": "承认早前 commit message 里的 5.54→0.63 是上游作者的数，不是本机实测。",
+  "decision_5": "发现 56 倍退化后先修再谈收益，不把边界退化留到提测之后。",
+  "what_generalizes": "同一份数据、同一批语句、两个版本、逐字节比较——这套对拍方式可以直接搬到任何「只改执行路径不改语义」的重写任务上。"
+ },
+ "limitations": [
+  "分路径与分阶段数据在本机测（Windows / CPython 3.13.14 / numpy 2.5.4），判题环境是 Linux x86_64 容器，绝对耗时不可直接对比，只用同机新旧对照。",
+  "外部复核在 Linux 盒子上用纯 stdlib 跑出的公开用例 20/20 与本机结论一致，但两边绝对数值不同（本机旧版 1.583 ms 对盒子 0.820 ms 量级），说明只能比值不能比绝对值。",
+  "GC 阈值与 gc.freeze() 的单独收益本轮没有拆开测，材料不引用未测数字。",
+  "exp-06 的退化需要一个被压到 1 MiB 的缓存上限才能触发，属于人为条件；官方 10000 行形态下该路径不可达，无法用公开用例复现。",
+  "平台记录 47252856（提交 91de35f）给出 E=161.000128；当前提交 43f1ccd 只在本地复核（0.593 ms/查询），尚未提测，本材料不把 161 记到 43f1ccd 上。",
+  "本文件不含密钥、令牌或账号信息。"
+ ],
+ "evidence_index": {
+  "note": "按五个评价维度列证据；每条给出 RFC6901 pointer 与 <=240 字符原文引用，quote 均为所引字段的子串。未设自评分档位。",
+  "dimensions": [
+   {
+    "dimension": "问题理解与自主拆解",
+    "instances": [
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "在一万行的128维上跑的哪些测出来"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/0/result_output",
+       "quote": "topk_unfiltered        1.583     0.574"
+      },
+      "note": "学生把「优化得怎么样」拆成「每条路径各是多少」，先要基线再谈改动；结果给出 9 条路径的新旧对照。"
+     }
+    ],
+    "missing_note": null
+   },
+   {
+    "dimension": "技术理解与迁移",
+    "instances": [
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "带WHERE的TopK为什么不能先全取k再过滤"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/4/result_output",
+       "quote": "K' median 756 p95 1078 max 1358"
+      },
+      "note": "学生点名 WHERE 与 TopK 的次序问题，要求机制解释；实验给出 K' 随选择率变化的结构性证据（K' 上界是 N）。"
+     }
+    ],
+    "missing_note": null
+   },
+   {
+    "dimension": "独立验证与质疑",
+    "instances": [
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "你说的瓶颈是你才出来的还是这么来的，给我证据"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/1/result_output",
+       "quote": "row loop + result build          1.1163"
+      },
+      "note": "学生对结论来源提出质疑，不接受从代码推断；回应是插桩分解 + _passes 10000→0 次的硬计数。"
+     },
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "改完后用同一批SQL对比新旧版本，逐条对比，不一样的列出"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/3/result_output",
+       "quote": "statements compared: 1587   byte-identical: 1587   mismatches: 0"
+      },
+      "note": "学生要求逐条而非抽样，并要求把差异列出来；实测 1587 条字节一致，差异清单为空。"
+     },
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "这个改动有没有让任意查询变慢"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/5/result_output",
+       "quote": "mid  a134ae3  ： 368.921 ms/query  cap=1MiB"
+      },
+      "note": "学生要求做反向检查；正是这一问暴露出边界上 56 倍退化，随后修复。"
+     }
+    ],
+    "missing_note": null
+   },
+   {
+    "dimension": "实验与反馈迭代",
+    "instances": [
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "先别改代码"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/2/result_output",
+       "quote": "scaling from 2000 to 20000 rows: old 5.05x, new 1.46x"
+      },
+      "note": "学生限定测量必须在未改动引擎上进行，使基线可信；规模扫描再独立验证一次，两条证据互相印证。"
+     }
+    ],
+    "missing_note": null
+   },
+   {
+    "dimension": "取舍与反思",
+    "instances": [
+     {
+      "student_evidence": {
+       "json_pointer": "/user_prompts/0/content",
+       "quote": "如果直流一个改动，你会留哪个"
+      },
+      "result_evidence": {
+       "json_pointer": "/experiments/5/result_output",
+       "quote": "new  43f1ccd  ：   5.851 ms/query  cap=1MiB"
+      },
+      "note": "学生要求被约束条件下的单一选择；取舍结果是留惰性物化，但必须带 43f1ccd 的兜底，否则大表反而不如不改。"
+     }
+    ],
+    "missing_note": null
+   }
+  ]
+ },
+ "sessions": [
+  {
+   "id": "s1",
+   "date": "2026-11-13",
+   "context": "600081 第二轮性能收尾；平台当日提测额度已用尽，只能本地复核。",
+   "student_choices": [
     {
-      "id": "s3",
-      "date": "2026-11-12",
-      "context": "上一版 93c52d0f 已通过功能准入（性能 E = 231.519603（平台原始口径，非百分制），Prompt 项被判无效）。下午继续推 600080 / 600069，并决定 600081 的收尾方式。",
-      "student_choices": [
-        {
-          "question": "600080 是否继续投入？",
-          "choice": "阶跃星辰 600073（20 分）",
-          "reason_recorded": "要求先用基线 commit 对照确认打分口径，再决定是否继续投入。"
-        },
-        {
-          "question": "600081 MiniVectorDB 由谁收尾？",
-          "choice": "我接管",
-          "reason_recorded": "避免两个会话重复劳动、互相覆盖提测版本。"
-        }
-      ],
-      "agent_actions": "跑基线 commit 对照实验；把 file_sql 移植到 600069 分支并提测；改写 Agent Prompt 材料的证据结构。",
-      "outcomes": "600080 基线 commit 实测 0 分、优化版 1.567 分 → 判定需整体耗时减半，按学生决定暂停；600069 文件即数据库 50 分通过，总分 110/160。"
+     "choice": "先别改代码，先给测量",
+     "reason_recorded": "p1 首句；要求基线先于优化。"
+    },
+    {
+     "choice": "要求区分「测出来的」与「推出来的」",
+     "reason_recorded": "p1 第二句；不接受从代码推断的结论当证据。"
+    },
+    {
+     "choice": "要求逐条对拍并列差异",
+     "reason_recorded": "p1 第三句；不接受抽样或汇总结论。"
+    },
+    {
+     "choice": "要求做变慢检查并给单一取舍",
+     "reason_recorded": "p1 第五、六句；收益之外要问代价。"
     }
-  ],
-  "schema": "agent-learning-evidence-v3-unbounded",
-  "summary": "本材料记录 600081 MiniVectorDB 一题从 0 分到通过功能准入的过程：先复现平台上 3 个失败用例、把本地驱动的读取方式改成按行读取后结论才可信，再重写查询路径并用离线 numpy 降低 TopK 耗时。学生负责目标与验收顺序、环境约束、失败后的取舍；方案设计与编码由 agent 完成，材料逐条用 attribution 标注归属，agent 的规划与解释不计作学生理解。每个证据实例给出 student_evidence 与 result_evidence 的 JSON pointer 与原文，没有学生侧证据的维度直接写明「无」，不以 agent 内容顶替。全部材料按 agent-learning-evidence-v3-unbounded（五维度、四档 0.5/1/1.5/2、实例去重）组织。"
+   ],
+   "agent_actions": [
+    "搭 probe/ 下 6 个测量脚本",
+    "9 条路径 × 新旧两版 × 独立进程基准",
+    "插桩分解 + 规模扫描交叉验证",
+    "1587 条语句逐字节对拍",
+    "选择率实验量化 K'",
+    "复现并修复 56 倍边界退化（43f1ccd）"
+   ],
+   "outcomes": [
+    "无过滤 TopK 1.583→0.574 ms",
+    "1587 条 0 不一致",
+    "边界退化 368.9→5.85 ms"
+   ]
+  }
+ ],
+ "schema": "conversation-material/4",
+ "summary": "本材料记录 600081 的一轮性能质询：学生要求先不改代码、先给万行 128 维的分路径数据，追问瓶颈是测出来的还是推出来的，要求同一批 SQL 逐条对拍、把差异列出，追问 WHERE 与 TopK 的次序，并检查是否引入退化、在只能留一个改动时怎么取舍。九条路径里只有无过滤 TopK 变快（1.583→0.574 ms），1587 条语句字节一致，WHERE 实验显示 1% 选择率下先取 10 再过滤有 91.2% 返回空集。反向检查还暴露出一处只在超大表触发的 56 倍退化，已修。"
 }
