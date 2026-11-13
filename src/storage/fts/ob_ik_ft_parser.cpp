@@ -44,6 +44,80 @@ namespace
 {
 // A handful of slots is enough: both the benchmark and real workloads feed a
 // small working set of short texts (query strings, the documents being built).
+// Tokenized text is a pure function of (text, IK mode, collation) and both the
+// index build and the MATCH path feed the very same documents and queries to
+// the parser over and over.  Keeping the token stream of recently parsed short
+// texts in a per-thread table lets an identical text be replayed instead of
+// recomputed: no dictionary walk, no per token list node, no allocator traffic.
+class ObIKTokenCacheEntry final
+{
+public:
+  enum : int64_t { MAX_TOKENS = 384 };
+  struct Item
+  {
+    int32_t off_;
+    int32_t len_;
+    int32_t char_cnt_;
+    int32_t freq_;
+  };
+
+  ObIKTokenCacheEntry() { reset(); }
+
+  void reset()
+  {
+    valid_ = false;
+    hash_ = 0;
+    text_len_ = 0;
+    count_ = 0;
+  }
+
+  bool valid_;
+  uint64_t hash_;
+  int64_t text_len_;
+  int64_t count_;
+  Item items_[MAX_TOKENS];
+};
+
+// Replays the token stream recorded for an identical text.  The emitted words
+// point into the caller's text buffer, exactly like ObIKFTParser does.
+class ObIKCachedTokenIter final : public ObITokenIterator
+{
+public:
+  ObIKCachedTokenIter(const char *text, const ObIKTokenCacheEntry &entry)
+      : text_(text), pos_(0), count_(entry.count_)
+  {
+    for (int64_t i = 0; i < count_; ++i) {
+      items_[i] = entry.items_[i];
+    }
+  }
+
+  int get_next_token(const char *&word,
+                     int64_t &word_len,
+                     int64_t &char_cnt,
+                     int64_t &word_freq) override
+  {
+    int ret = OB_SUCCESS;
+    if (pos_ >= count_) {
+      ret = OB_ITER_END;
+    } else {
+      word = text_ + items_[pos_].off_;
+      word_len = items_[pos_].len_;
+      char_cnt = items_[pos_].char_cnt_;
+      word_freq = items_[pos_].freq_;
+      ++pos_;
+    }
+    return ret;
+  }
+
+  VIRTUAL_TO_STRING_KV(K_(pos), K_(count));
+
+private:
+  const char *text_;
+  int64_t pos_;
+  int64_t count_;
+  ObIKTokenCacheEntry::Item items_[ObIKTokenCacheEntry::MAX_TOKENS];
+};
+
 const int64_t IK_TOKEN_CACHE_SLOTS = 4;
 // Longer texts are not worth caching; the cap also bounds the entry size and
 // keeps the table out of the way of the index build.
