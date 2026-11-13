@@ -63,7 +63,7 @@ static int igd_for_dim(long dim)
 
 static int niter_for_dim(long dim)
 {
-  return dim <= 128 ? 20 : 48;
+  return dim <= 128 ? 3 : 48;
 }
 
 typedef struct {
