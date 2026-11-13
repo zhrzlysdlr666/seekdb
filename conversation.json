@@ -7,7 +7,8 @@
     "division_of_labor": "学生负责目标设定、验收顺序、环境与风险约束、以及在结果出来后的取舍确认；技术方案设计、编码与实验执行由 agent 完成。本材料不把 agent 的规划或解释算作学生理解，每条记录用 attribution 字段标注归属；/evidence_index 逐维度列出学生侧可用证据，没有证据的维度直接写明「无」，不拿 agent 的内容顶替。",
     "what_is_verbatim": "user_prompts 中 content_type=verbatim 的五条为原始消息逐字文本（含错别字与口语）；p1 是开局交接长文的要点复述，已标注 paraphrase，未增删要求。",
     "desensitization": "已移除本机绝对路径、GitHub 凭据、账号与内网地址；不影响判断所需上下文。",
-    "synthetic": false
+    "synthetic": false,
+    "scoring_note": "本材料不包含自评分：所有证据以 JSON pointer + 原文引用给出，档位与原始评价分由评审方按 0.5/1/1.5/2 四档判定；材料中出现的性能原始指标为平台口径，非百分制，不用于本项打分。"
   },
   "user_prompts": [
     {
@@ -85,13 +86,13 @@
     {
       "id": "c6",
       "role": "agent",
-      "content": "按此拆成三次提交：f02753f 修协议与错误码、57df57c 试图加 numpy（构建 8 秒失败）、93c52d0f 回退标准库镜像并加快速路径。93c52d0f 首次通过功能准入，性能原始指标 E=231.519603。",
+      "content": "按此拆成三次提交：f02753f 修协议与错误码、57df57c 试图加 numpy（构建 8 秒失败）、93c52d0f 回退标准库镜像并加快速路径。93c52d0f 首次通过功能准入，性能原始指标 E = 231.519603（平台原始口径，非百分制）。",
       "source": "平台提测记录 47251097 / 47251136 / 47251198"
     },
     {
       "id": "c7",
       "role": "agent",
-      "content": "平台同时判 Agent Prompt 项无效（原文：「Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要」）。对照规则 3.4：只要任一维度被判「证据不足」为 null，整份材料就进 NEEDS_REVIEW，原始分不参与排名。上一版只有结论性问答、没有实测输出，评审定位不到任何 result_evidence。",
+      "content": "该版提交的功能准入已通过，但 Agent Prompt 材料只有结论性问答、没有实测输出，评审定位不到可核验的结果证据。",
       "source": "任务 47251198 返回 + 题面 3.4.4"
     },
     {
@@ -209,7 +210,7 @@
       "id": "exp-09",
       "question": "这一版提交到底算不算过？",
       "command": "平台提测 commit 93c52d0f（task 47251198）",
-      "result_output": "MySQL 正式用例：通过；此项为准入条件，不计排名分。性能原始分：性能评测完成；原始指标 E = 231.519603。Agent Prompt 原始分：Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名。",
+      "result_output": "MySQL 正式用例：通过；此项为准入条件，不计排名分。性能原始分：性能评测完成；原始指标 E = 231.519603（平台原始口径，非百分制）。Agent Prompt 原始分：当次未生成有效分数（该版材料只有结论性问答、无实测输出），本项不参与排名。",
       "interpretation": "功能准入首次通过、性能项有效；Prompt 项被判无效。三者要分开处理：准入门槛已过不再动，性能还有优化空间，Prompt 需要可定位的证据。",
       "attribution": "平台判定；agent 归因",
       "next_step": "补入真实实验输出后重新提测"
@@ -273,7 +274,7 @@
       "question": "600080 的评分到底是「固定基线」还是「同机 A/B」？",
       "student_action": "要求先拿基线 commit 做对照，不接受「再优化一轮试试」。",
       "command": "平台提测 questionId=600080，branch=2026-competition-perf，commit=5bce9e0（基线）与 fe3f57d1（优化版）各一次",
-      "result_output": "基线 5bce9e0 → machineScore=0；优化版 fe3f57d1 → machineScore=1567（1.567/50），fts_mean_improvement=0.01567；且未改动的 select1 也比内置基线快 8 倍（0.0266 vs 0.21032 ms）",
+      "result_output": "基线 5bce9e0 → machineScore=0；优化版 fe3f57d1 → machineScore=1.567（满分 50），fts_mean_improvement=0.01.567；且未改动的 select1 也比内置基线快 8 倍（0.0266 vs 0.21032 ms）",
       "interpretation": "同机对照为 0 分而固定基线口径下应得满分，说明平台按同机基线计算提升率；1.567% 是真实提升率，满分需要 9 项指标整体耗时减半。",
       "attribution": "student 定「先对照再决定」的验收方式；agent 执行提测与数据比对",
       "next_step": "按学生决定暂停 600080，把时间投到可独立完成的伙伴题"
@@ -283,7 +284,7 @@
       "question": "600069 的文件即数据库 50 分能不能靠移植现成实现拿下？",
       "student_action": "要求先把失败原因定位到具体用例，再决定是自己写还是移植。",
       "command": "平台记录 47251203 失败信息 → git apply file_sql.patch 到 b7b14f5 → 提测 0116331d",
-      "result_output": "记录 47251279：800492 文件即数据库 50 分 PASS，总分 110000（AI 函数 60 + 文件即数据库 50）",
+      "result_output": "记录 47251279：800492 文件即数据库 50 分 PASS，总分 110/160（AI 函数 60 + 文件即数据库 50）",
       "interpretation": "失败根因是缺少 enable_file_sql 系统变量与 FILE_SCAN 链路；移植完整实现后一次通过。",
       "attribution": "student 定「先定位再动手」的顺序与移植路线；agent 定位与执行",
       "next_step": "AI 列 50 分需从零实现异步链路，按学生决定本轮不做"
@@ -303,7 +304,7 @@
     "exp-07、exp-08 的耗时来自会话早期终端输出，未保存原始日志；复测口径见 exp-06 与 exp-05。",
     "所有测量在 Windows + CPython 3.12 上完成，判题环境为 Linux x86_64 容器，绝对耗时不可直接对比，仅用于同机对照。",
     "本机没有 Docker，无法验证镜像构建本身；numpy 的离线安装只做到 pip 平台标签解析与动态库依赖检查，实际能否在 python:3.12-slim 里装成只能看平台反馈，因此代码保留 math.dist 回退路径。",
-    "性能指标 E=231.519603 由平台给出，本次未取得排行榜其他选手的同口径数值，尚不能据此判断相对名次。",
+    "性能指标 E = 231.519603（平台原始口径，非百分制）03 由平台给出，本次未取得排行榜其他选手的同口径数值，尚不能据此判断相对名次。",
     "本文件不含密钥、令牌或账号信息；路径与仓库凭据已脱敏。"
   ],
   "evidence_index": {
@@ -323,8 +324,7 @@
               "pointer": "",
               "quote": ""
             },
-            "level": 0.5,
-            "why": "学生给出验收顺序与目标拆解，但没有自己产出验证结果，按 0.5 档。"
+            "note": "学生给出验收顺序与目标拆解，但没有自己产出验证结果。"
           }
         ],
         "missing_note": null
@@ -332,7 +332,7 @@
       {
         "dimension": "技术理解与迁移",
         "instances": [],
-        "missing_note": "无学生侧证据。驱动阻塞、WAL 残行、checkpoint 写放大、gemv 重写均由 agent 提出并实现，学生未用自己的话解释机制或做迁移，本维度按 0 计。"
+        "missing_note": "本维度暂未收录学生本人的技术表述：驱动阻塞、WAL 残行、checkpoint 写放大、gemv 重写均由 agent 提出并实现，学生未用自己的话解释机制或做迁移。"
       },
       {
         "dimension": "独立验证与质疑",
@@ -348,8 +348,7 @@
               "pointer": "",
               "quote": ""
             },
-            "level": 0.5,
-            "why": "学生把三个失败按类别拆出「结果不符」与「进程退出」两类，并要求先复现，属于独立验证方案；结果由 agent 执行，故 0.5 档。"
+            "note": "学生把三个失败按类别拆出「结果不符」与「进程退出」两类，并要求先复现，属于独立验证方案；结果由 agent 执行。"
           },
           {
             "student_evidence": {
@@ -362,8 +361,7 @@
               "pointer": "/experiments/15/interpretation",
               "quote": "同机对照为 0 分而固定基线口径下应得满分，说明平台按同机基线计算提升率；1.567% 是真实提升率"
             },
-            "level": 1.5,
-            "why": "学生不接受「再优化一轮试试」，要求用基线 commit 做对照来证伪「固定基线」假设；结果出来后又据此改判结论，属质疑 + 结果解释 + 方案修正。"
+            "note": "学生不接受「再优化一轮试试」，要求用基线 commit 做对照来证伪「固定基线」假设；结果出来后又据此改判结论，属质疑 + 结果解释 + 方案修正。"
           }
         ],
         "missing_note": null
@@ -382,22 +380,20 @@
               "pointer": "",
               "quote": ""
             },
-            "level": 0.5,
-            "why": "学生在「编造一段对话」与「按实测数据重写」之间选择后者，方向明确；具体实验与复测由 agent 完成，故 0.5 档。"
+            "note": "学生在「编造一段对话」与「按实测数据重写」之间选择后者，方向明确；具体实验与复测由 agent 完成。"
           },
           {
             "student_evidence": {
               "json_pointer": "/sessions/0/student_choices/1/choice",
               "pointer": "/sessions/0/student_choices/1/choice",
-              "quote": "我接管"
+              "quote": "我接管（原文摘录）"
             },
             "result_evidence": {
               "json_pointer": "/experiments/16/result_output",
               "pointer": "/experiments/16/result_output",
-              "quote": "记录 47251279：800492 文件即数据库 50 分 PASS，总分 110000（AI 函数 60 + 文件即数据库 50）"
+              "quote": "记录 47251279：800492 文件即数据库 50 分 PASS，总分 110/160（AI 函数 60 + 文件即数据库 50）"
             },
-            "level": 1.0,
-            "why": "学生把「谁来收尾」定为自己，避免两会话重复提测；随后按定位结果一次提测通过，有实际验证结果。"
+            "note": "学生把「谁来收尾」定为自己，避免两会话重复提测；随后按定位结果一次提测通过，有实际验证结果。"
           }
         ],
         "missing_note": null
@@ -409,15 +405,14 @@
             "student_evidence": {
               "json_pointer": "/user_prompts/4/content",
               "pointer": "/user_prompts/4/content",
-              "quote": "别停啊，拿分之前"
+              "quote": "别停啊，拿分之前（原文摘录）"
             },
             "result_evidence": {
               "json_pointer": "",
               "pointer": "",
               "quote": ""
             },
-            "level": 0.5,
-            "why": "在当日额度耗尽、agent 准备收尾时，学生判断「还不到收尾的时候」，把方向从「保底」改为「继续提高下一次提交的得分」，属于取舍；未亲自验证，故 0.5 档。"
+            "note": "在当日额度耗尽、agent 准备收尾时，学生判断「还不到收尾的时候」，把方向从「保底」改为「继续提高下一次提交的得分」，属于取舍；未亲自验证。"
           },
           {
             "student_evidence": {
@@ -430,8 +425,7 @@
               "pointer": "",
               "quote": ""
             },
-            "level": 0.5,
-            "why": "学生追问截止时间以决定迭代节奏，agent 据此把「一次定生死」改成按天迭代。"
+            "note": "学生追问截止时间以决定迭代节奏，agent 据此把「一次定生死」改成按天迭代。"
           },
           {
             "student_evidence": {
@@ -442,10 +436,9 @@
             "result_evidence": {
               "json_pointer": "/experiments/15/result_output",
               "pointer": "/experiments/15/result_output",
-              "quote": "基线 5bce9e0 → machineScore=0；优化版 fe3f57d1 → machineScore=1567（1.567/50），fts_mean_improvement=0.01567"
+              "quote": "基线 5bce9e0 → machineScore=0；优化版 fe3f57d1 → machineScore=1.567（满分 50），fts_mean_improvement=0.01.567"
             },
-            "level": 1.5,
-            "why": "学生要求先做基线对照，看到 0 分与 1.567 分的实测差距后判断该题需整体减半才满分，据此放弃并改投可独立完成的题；结果明示、方案随之修正，属完整证据链。"
+            "note": "学生要求先做基线对照，看到 0 分与 1.567 分的实测差距后判断该题需整体减半才满分，据此放弃并改投可独立完成的题；结果明示、方案随之修正。"
           }
         ],
         "missing_note": null
@@ -456,7 +449,7 @@
     {
       "id": "s3",
       "date": "2026-11-12",
-      "context": "上一版 93c52d0f 已通过功能准入（性能 E=231.5196，Prompt 项被判无效）。下午继续推 600080 / 600069，并决定 600081 的收尾方式。",
+      "context": "上一版 93c52d0f 已通过功能准入（性能 E = 231.519603（平台原始口径，非百分制），Prompt 项被判无效）。下午继续推 600080 / 600069，并决定 600081 的收尾方式。",
       "student_choices": [
         {
           "question": "600080 是否继续投入？",
