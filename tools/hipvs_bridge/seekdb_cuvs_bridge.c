@@ -49,11 +49,14 @@
 #endif
 
 /* 16 + dim/8: 32 rounds at 128 dims, 48 at 256, 64 at 384 and above. */
+/* 24 + dim/16: 32 rounds at 128 dims, 40 at 256. See section 7.5 of the report:
+ * the 128-dim shape still measures above baseline recall at 32 rounds while the
+ * 256-dim shape needs about 40 to stay inside the 0.005 gate. */
 static int niter_for_dim(long dim)
 {
-  long it = 16 + dim / 8;
+  long it = 24 + dim / 16;
   if (it > 64) it = 64;
-  if (it < 32) it = 32;
+  if (it < 24) it = 24;
   return (int) it;
 }
 
