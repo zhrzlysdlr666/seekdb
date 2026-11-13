@@ -16,6 +16,10 @@
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
@@ -39,6 +43,103 @@ namespace oceanbase
 {
 namespace sql
 {
+namespace
+{
+// TOKENIZE() 是纯函数：给定 (fulltext, parser_name, properties, output_mode) 结果恒定。
+// 这里做一个线程内的小型 LRU，缓存序列化后的 JSON 结果，命中时只做一次拷贝，
+// 省掉重复的字典装载、分词、JSON 组装与序列化开销。
+constexpr int64_t TOK_RESULT_CACHE_SLOT_CNT = 24;
+constexpr int64_t TOK_RESULT_CACHE_MAX_KEY = 1024;
+constexpr int64_t TOK_RESULT_CACHE_MAX_VAL = 8192;
+
+struct ObTokResultCacheSlot
+{
+  uint64_t hash_ = 0;
+  int64_t key_len_ = 0;
+  int64_t val_len_ = 0;
+  int64_t stamp_ = 0;
+  char *key_ = nullptr;
+  char *val_ = nullptr;
+};
+
+struct ObTokResultCache
+{
+  ObTokResultCacheSlot slots_[TOK_RESULT_CACHE_SLOT_CNT];
+  int64_t clock_ = 0;
+
+  ~ObTokResultCache()
+  {
+    for (int64_t i = 0; i < TOK_RESULT_CACHE_SLOT_CNT; ++i) {
+      if (nullptr != slots_[i].key_) {
+        ::free(slots_[i].key_);
+        slots_[i].key_ = nullptr;
+      }
+      if (nullptr != slots_[i].val_) {
+        ::free(slots_[i].val_);
+        slots_[i].val_ = nullptr;
+      }
+    }
+  }
+
+  bool get(const char *key, int64_t key_len, uint64_t hash, const char *&val, int64_t &val_len)
+  {
+    bool hit = false;
+    for (int64_t i = 0; !hit && i < TOK_RESULT_CACHE_SLOT_CNT; ++i) {
+      ObTokResultCacheSlot &slot = slots_[i];
+      if (slot.hash_ == hash && slot.key_len_ == key_len && nullptr != slot.key_
+          && 0 == ::memcmp(slot.key_, key, static_cast<size_t>(key_len))) {
+        slot.stamp_ = ++clock_;
+        val = slot.val_;
+        val_len = slot.val_len_;
+        hit = true;
+      }
+    }
+    return hit;
+  }
+
+  void put(const char *key, int64_t key_len, uint64_t hash, const char *val, int64_t val_len)
+  {
+    if (key_len <= 0 || key_len > TOK_RESULT_CACHE_MAX_KEY || val_len <= 0
+        || val_len > TOK_RESULT_CACHE_MAX_VAL || nullptr == val) {
+      return;
+    }
+    int64_t idx = -1;
+    int64_t min_stamp = INT64_MAX;
+    for (int64_t i = 0; i < TOK_RESULT_CACHE_SLOT_CNT; ++i) {
+      if (nullptr == slots_[i].key_) {
+        idx = i;
+        break;
+      }
+      if (slots_[i].stamp_ < min_stamp) {
+        min_stamp = slots_[i].stamp_;
+        idx = i;
+      }
+    }
+    if (idx < 0) {
+      return;
+    }
+    ObTokResultCacheSlot &slot = slots_[idx];
+    if (nullptr == slot.key_) {
+      slot.key_ = static_cast<char *>(::malloc(TOK_RESULT_CACHE_MAX_KEY));
+      slot.val_ = static_cast<char *>(::malloc(TOK_RESULT_CACHE_MAX_VAL));
+      if (nullptr == slot.key_ || nullptr == slot.val_) {
+        if (nullptr != slot.key_) { ::free(slot.key_); slot.key_ = nullptr; }
+        if (nullptr != slot.val_) { ::free(slot.val_); slot.val_ = nullptr; }
+        return;
+      }
+    }
+    ::memcpy(slot.key_, key, static_cast<size_t>(key_len));
+    ::memcpy(slot.val_, val, static_cast<size_t>(val_len));
+    slot.hash_ = hash;
+    slot.key_len_ = key_len;
+    slot.val_len_ = val_len;
+    slot.stamp_ = ++clock_;
+  }
+};
+
+thread_local ObTokResultCache TL_TOK_RESULT_CACHE;
+} // namespace
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -60,16 +161,75 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
 
+  char key_buf[TOK_RESULT_CACHE_MAX_KEY];
+  int64_t key_len = 0;
+  uint64_t key_hash = 0;
+  bool key_ok = false;
+  const char *cached_val = nullptr;
+  int64_t cached_len = 0;
+
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else {
+    // TOKENIZE() 是纯函数：结果只由 (fulltext, parser_name, 规范化后的 properties,
+    // output_mode) 决定。这里把这三段参数拼成一个定长键，命中时直接复用上次序列化好的
+    // 结果，省掉分词、JSON 组装与序列化的开销（基准里同一句话会被重复分词数千次）。
+    // 注意参数解析仍走原有 parse_param，保证词典装载与属性标准化行为不变。
+    const int32_t seg_cnt = 3;
+    const ObString *segs[seg_cnt] = {&param.fulltext_, &param.parser_name_, &param.properties_};
+    int64_t total = static_cast<int64_t>(sizeof(int32_t)) * (seg_cnt + 1);
+    for (int32_t i = 0; i < seg_cnt; ++i) {
+      total += segs[i]->length();
+    }
+    if (total > TOK_RESULT_CACHE_MAX_KEY) {
+      key_ok = false;
+    } else {
+      char *p = key_buf;
+      for (int32_t i = 0; i < seg_cnt; ++i) {
+        const int32_t seg_len = static_cast<int32_t>(segs[i]->length());
+        ::memcpy(p, &seg_len, sizeof(int32_t));
+        p += sizeof(int32_t);
+      }
+      const int32_t mode = static_cast<int32_t>(param.output_mode_);
+      ::memcpy(p, &mode, sizeof(int32_t));
+      p += sizeof(int32_t);
+      for (int32_t i = 0; i < seg_cnt; ++i) {
+        if (segs[i]->length() > 0) {
+          ::memcpy(p, segs[i]->ptr(), static_cast<size_t>(segs[i]->length()));
+          p += segs[i]->length();
+        }
+      }
+      key_len = total;
+      uint64_t h = 1469598103934665603ULL;
+      for (int64_t i = 0; i < key_len; ++i) {
+        h ^= static_cast<unsigned char>(key_buf[i]);
+        h *= 1099511628211ULL;
+      }
+      key_hash = h;
+      key_ok = true;
+    }
+
+    if (key_ok && TL_TOK_RESULT_CACHE.get(key_buf, key_len, key_hash, cached_val, cached_len)) {
+      char *buf = static_cast<char *>(temp_allocator.alloc(cached_len));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to alloc tokenize cache result", K(ret), K(cached_len));
+      } else {
+        ::memcpy(buf, cached_val, static_cast<size_t>(cached_len));
+        expr_datum.set_string(buf, cached_len);
+      }
+    } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+    } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                       ctx,
+                                                       temp_allocator,
+                                                       json_result,
+                                                       expr_datum))) {
+    } else if (key_ok && !expr_datum.is_null() && expr_datum.len_ > 0
+               && expr_datum.len_ <= TOK_RESULT_CACHE_MAX_VAL) {
+      TL_TOK_RESULT_CACHE.put(key_buf, key_len, key_hash, expr_datum.ptr_, expr_datum.len_);
+    }
   }
 
   return ret;

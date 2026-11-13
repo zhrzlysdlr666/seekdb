@@ -1047,7 +1047,10 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MAX(original_parallelism / 3, 1L);
+        // 全文索引构建是纯 CPU 的逐文档分词 + 写 doc_word 行，单线程明显吃不饱。
+        // 原实现直接把并行度除以 3，导致 FTS 索引构建阶段几乎退化为串行；
+        // 这里保持原始并行度（至少 2），让分词与写入真正并行起来。
+        decided_parallelism = MAX(original_parallelism, 2L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
