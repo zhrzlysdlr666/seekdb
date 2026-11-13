@@ -14,26 +14,55 @@
 /* Build parameters for the CAGRA graph. graph_degree is the one that the query
  * path walks, so it is kept where the contest baseline had it; the intermediate
  * degree and the NN-descent iteration count are pure construction overhead and
- * are tuned down. All three can be overridden at compile time with -D for local
- * A/B experiments.
+ * are the two knobs tuned here. All three can be overridden at compile time
+ * with -D for local A/B experiments.
  *
- * The 128/128/32 triple is not a guess: it was measured on a gfx1100 (ROCm 7.2.4)
- * against the frozen baseline with a cuVS C-API harness, see
- * docs/amd-cagra-build-optimization.md. intermediate_graph_degree == graph_degree
- * removes the candidate-pruning headroom entirely, which is only safe because the
- * final graph degree is untouched; nn_descent_niter == 32 is the last setting that
- * still reproduces baseline recall@100 on both 250K x 128 and 250K x 256 shapes.
- * Going to 24 iterations is faster but drops recall@100 by ~0.010 on the 256-dim
- * shape, i.e. past the 0.005 gate. */
+ * Both knobs are derived from the input dimensionality rather than pinned to a
+ * single constant, because the two effects have different shapes:
+ *
+ *   nn_descent_niter      NN-descent stops improving its kNN graph once the
+ *                         neighbour lists stop changing, and that happens after
+ *                         more rounds the higher the intrinsic dimension is.
+ *                         Measured on gfx1100: 32 rounds reproduce baseline
+ *                         recall@100 at 128 dims, 256 dims need ~48.
+ *
+ *   intermediate_graph_degree
+ *                         The candidate graph is pruned down to graph_degree at
+ *                         the end of the build. At 128 dims the candidate lists
+ *                         are already unambiguous enough that no headroom is
+ *                         needed (128 == graph_degree). At 256 dims cutting the
+ *                         headroom to zero measurably erodes recall, so the
+ *                         cuVS default 2x ratio is reduced to 1.25x instead of
+ *                         removed.
+ *
+ * See docs/amd-cagra-build-optimization.md sections 7.5/7.6 for the sweeps. */
 #ifndef SEEKDB_CUVS_GRAPH_DEGREE
 #define SEEKDB_CUVS_GRAPH_DEGREE 128
 #endif
 #ifndef SEEKDB_CUVS_INTERMEDIATE_DEGREE
-#define SEEKDB_CUVS_INTERMEDIATE_DEGREE 128
+/* 0 means "derive from the dimensionality" (see igd_for_dim). */
+#define SEEKDB_CUVS_INTERMEDIATE_DEGREE 0
 #endif
 #ifndef SEEKDB_CUVS_NN_DESCENT_NITER
-#define SEEKDB_CUVS_NN_DESCENT_NITER 40
+/* 0 means "derive from the dimensionality" (see niter_for_dim). */
+#define SEEKDB_CUVS_NN_DESCENT_NITER 0
 #endif
+
+/* 16 + dim/8: 32 rounds at 128 dims, 48 at 256, 64 at 384 and above. */
+static int niter_for_dim(long dim)
+{
+  long it = 16 + dim / 8;
+  if (it > 64) it = 64;
+  if (it < 32) it = 32;
+  return (int) it;
+}
+
+/* Keep the candidate-pruning headroom only where the dimension needs it. */
+static int igd_for_dim(long dim)
+{
+  return dim <= 160 ? SEEKDB_CUVS_GRAPH_DEGREE
+                    : (SEEKDB_CUVS_GRAPH_DEGREE * 5) / 4;
+}
 
 typedef struct {
   cuvsResources_t        res;
@@ -63,8 +92,12 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
    * intermediate degree only needs to stay above graph_degree. Cutting both shrinks
    * the distance-computation volume of graph construction by ~2.7x. */
   h->ip->graph_degree = SEEKDB_CUVS_GRAPH_DEGREE;
-  h->ip->intermediate_graph_degree = SEEKDB_CUVS_INTERMEDIATE_DEGREE;
-  h->ip->nn_descent_niter = SEEKDB_CUVS_NN_DESCENT_NITER;
+  h->ip->intermediate_graph_degree = SEEKDB_CUVS_INTERMEDIATE_DEGREE > 0
+                                     ? SEEKDB_CUVS_INTERMEDIATE_DEGREE
+                                     : igd_for_dim(dim);
+  h->ip->nn_descent_niter = SEEKDB_CUVS_NN_DESCENT_NITER > 0
+                            ? SEEKDB_CUVS_NN_DESCENT_NITER
+                            : niter_for_dim(dim);
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
