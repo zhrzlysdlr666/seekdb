@@ -15,15 +15,24 @@
  * path walks, so it is kept where the contest baseline had it; the intermediate
  * degree and the NN-descent iteration count are pure construction overhead and
  * are tuned down. All three can be overridden at compile time with -D for local
- * A/B experiments. */
+ * A/B experiments.
+ *
+ * The 128/128/32 triple is not a guess: it was measured on a gfx1100 (ROCm 7.2.4)
+ * against the frozen baseline with a cuVS C-API harness, see
+ * docs/amd-cagra-build-optimization.md. intermediate_graph_degree == graph_degree
+ * removes the candidate-pruning headroom entirely, which is only safe because the
+ * final graph degree is untouched; nn_descent_niter == 32 is the last setting that
+ * still reproduces baseline recall@100 on both 250K x 128 and 250K x 256 shapes.
+ * Going to 24 iterations is faster but drops recall@100 by ~0.010 on the 256-dim
+ * shape, i.e. past the 0.005 gate. */
 #ifndef SEEKDB_CUVS_GRAPH_DEGREE
 #define SEEKDB_CUVS_GRAPH_DEGREE 128
 #endif
 #ifndef SEEKDB_CUVS_INTERMEDIATE_DEGREE
-#define SEEKDB_CUVS_INTERMEDIATE_DEGREE 160
+#define SEEKDB_CUVS_INTERMEDIATE_DEGREE 128
 #endif
 #ifndef SEEKDB_CUVS_NN_DESCENT_NITER
-#define SEEKDB_CUVS_NN_DESCENT_NITER 48
+#define SEEKDB_CUVS_NN_DESCENT_NITER 32
 #endif
 
 typedef struct {
