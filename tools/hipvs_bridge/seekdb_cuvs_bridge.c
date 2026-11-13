@@ -11,6 +11,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* Build parameters for the CAGRA graph. graph_degree is the one that the query
+ * path walks, so it is kept where the contest baseline had it; the intermediate
+ * degree and the NN-descent iteration count are pure construction overhead and
+ * are tuned down. All three can be overridden at compile time with -D for local
+ * A/B experiments. */
+#ifndef SEEKDB_CUVS_GRAPH_DEGREE
+#define SEEKDB_CUVS_GRAPH_DEGREE 128
+#endif
+#ifndef SEEKDB_CUVS_INTERMEDIATE_DEGREE
+#define SEEKDB_CUVS_INTERMEDIATE_DEGREE 192
+#endif
+#ifndef SEEKDB_CUVS_NN_DESCENT_NITER
+#define SEEKDB_CUVS_NN_DESCENT_NITER 50
+#endif
+
 typedef struct {
   cuvsResources_t        res;
   cuvsCagraIndexParams_t ip;
@@ -33,9 +48,14 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  /* Graph quality (and therefore Recall) is dominated by the *final* graph_degree,
+   * so that one is left at 128. The two knobs below only affect how the candidate
+   * graph is produced: nn_descent converges well before 100 iterations and the
+   * intermediate degree only needs to stay above graph_degree. Cutting both shrinks
+   * the distance-computation volume of graph construction by ~2.7x. */
+  h->ip->graph_degree = SEEKDB_CUVS_GRAPH_DEGREE;
+  h->ip->intermediate_graph_degree = SEEKDB_CUVS_INTERMEDIATE_DEGREE;
+  h->ip->nn_descent_niter = SEEKDB_CUVS_NN_DESCENT_NITER;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;

@@ -31,6 +31,9 @@
 #include <cstdio>
 #include <cstring>
 #include <pthread.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include "vsag/vsag.h"
 #include "vsag/errors.h"
 #include "vsag/dataset.h"
@@ -322,9 +325,32 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
 
 static const char OB_CUVS_SNAPSHOT_MAGIC[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '2'};
 struct ObCuvsSnapshotFile {
-  FILE *file_ = ::tmpfile();
+  FILE *file_ = nullptr;
   char path_[64] = {};
+  // The cuVS C API can only serialize to a path, so the graph has to make a round
+  // trip through a temporary file before it can be appended to the index stream.
+  // That file is pure scratch space, so back it with an anonymous in-memory file
+  // (memfd) when the kernel offers one: it removes a full write+read of the graph
+  // (hundreds of MB on the contest datasets) from the timed DDL path and keeps
+  // page cache pressure off the rest of the flush.
+  void open_memfd() {
+#if defined(__linux__) && defined(SYS_memfd_create)
+    // Called through syscall() on purpose: memfd_create() is not declared by every
+    // glibc the build has to support, while the syscall number is always available.
+    const int fd = static_cast<int>(::syscall(SYS_memfd_create, "ob_cuvs_snapshot", 0U));
+    if (fd >= 0) {
+      file_ = ::fdopen(fd, "w+b");
+      if (file_ != nullptr) {
+        ::snprintf(path_, sizeof(path_), "/proc/self/fd/%d", fd);
+        return;
+      }
+      ::close(fd);
+    }
+#endif
+  }
   ObCuvsSnapshotFile() {
+    open_memfd();
+    if (file_ == nullptr) { file_ = ::tmpfile(); }
     if (file_ != nullptr) {
       ::snprintf(path_, sizeof(path_), "/proc/self/fd/%d", ::fileno(file_));
     }
@@ -429,7 +455,7 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
     return true;
   }
-  std::vector<char> chunk(65536);
+  std::vector<char> chunk(8UL * 1024 * 1024);
   uint64_t remaining = graph_bytes;
   while (remaining > 0) {
     const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
@@ -475,7 +501,7 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
       LOG_WARN("[OBVSAG][cuVS] truncated snapshot payload", K(ret), KP(key), K(n64));
     } else {
       ObCuvsSnapshotFile graph;
-      std::vector<char> chunk(65536);
+      std::vector<char> chunk(8UL * 1024 * 1024);
       uint64_t remaining = graph_bytes;
       while (graph.file_ != nullptr && remaining > 0) {
         const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
