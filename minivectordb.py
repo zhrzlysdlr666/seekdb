@@ -18,6 +18,7 @@ Design
 from __future__ import annotations
 
 import heapq
+import gc
 import json
 import math
 import operator
@@ -46,6 +47,14 @@ CHECKPOINT_BYTES = 16 << 20
 EQ_INDEX_MIN_ROWS = 512
 # Differential switch: set to 1 to route filtered scans the slow way.
 NO_EQ_INDEX = os.environ.get("VECTORDB_NO_EQ_INDEX") == "1"
+
+# The benchmark sends a thousand distinct statements, each allocating a few
+# hundred short-lived objects. With the default thresholds generation 2 comes
+# round often enough to re-walk every stored row, and the per-query cost drifts
+# from 0.4 ms to 2 ms over a run. The engine builds almost no reference cycles,
+# so reference counting already frees this garbage; deferring the cycles sweep
+# keeps the cost flat without letting the resident set grow.
+gc.set_threshold(20000, 50, 50)
 
 
 # --------------------------------------------------------------------------- #
@@ -1100,6 +1109,10 @@ class Engine:
         self.committed_ops = []
         if self.store.dirty:
             self.checkpoint(force=True)
+        if self.tables:
+            # Rows recovered from disk are long-lived; park them permanently so
+            # a cycles sweep does not walk the whole dataset between queries.
+            gc.freeze()
 
     def checkpoint(self, force: bool = False) -> None:
         if not force:
@@ -1625,6 +1638,27 @@ class Engine:
         primary = self._primary_index(table)
         pk_name = table["columns"][primary]["name"] if primary is not None else None
 
+        # Resolve the ORDER BY / projection shape before touching any rows: the
+        # row-collection step below is allowed to skip the full scan only when
+        # the query turns out to be a whole-table vector TopK.
+        distance_slot = None
+        query_vec = None
+        vector_idx = None
+        vector_dim = None
+        projection_error = None
+        if order_term is not None:
+            order_expr, descending = order_term
+            for slot, (expr, _alias) in enumerate(items):
+                if self._is_l2_column_literal(expr):
+                    try:
+                        candidate = self._distance_projection(expr, items, slot, table, order_expr)
+                    except Exception as exc:  # surfaced below, after the scan
+                        projection_error = exc
+                        candidate = None
+                    if candidate is not None:
+                        distance_slot, query_vec, vector_idx, vector_dim = candidate
+                        break
+
         # primary-key equality narrows the scan to a single dict lookup
         pk_value = None
         residual = []
@@ -1670,6 +1704,13 @@ class Engine:
                     if rest and not self._passes(row, rest):
                         continue
                     selected.append((candidate, row))
+            elif (distance_slot is not None and not resolved and limit is not None
+                    and np is not None):
+                # Unfiltered TopK: the cached matrix already covers every row,
+                # so walking table["rows"] to build `selected` would cost more
+                # than the arithmetic it feeds and leave only K of its entries
+                # used. Stay lazy and materialise the winners at the end.
+                selected = None
             else:
                 selected = []
                 early_stop = order_term is None and limit is not None
@@ -1679,20 +1720,13 @@ class Engine:
                         if early_stop and len(selected) >= limit:
                             break
 
-        distance_slot = None
-        query_vec = None
-        vector_idx = None
-        vector_dim = None
         if order_term is not None:
-            order_expr, descending = order_term
-            for slot, (expr, _alias) in enumerate(items):
-                if self._is_l2_column_literal(expr):
-                    candidate = self._distance_projection(expr, items, slot, table, order_expr)
-                    if candidate is not None:
-                        distance_slot, query_vec, vector_idx, vector_dim = candidate
-                        break
+            if projection_error is not None:
+                # Same error the pre-optimisation code raised here, after the
+                # row scan, so existing error-ordering expectations still hold.
+                raise projection_error
             if distance_slot is None:
-                if limit is None:
+                if limit is None or selected is None:
                     return None
                 order_idx = self._resolve_order_column(order_expr, items, table)
                 if order_idx is None:
@@ -1711,7 +1745,7 @@ class Engine:
             else:
                 if limit is None:
                     return None
-                if not selected:
+                if selected is not None and not selected:
                     return self._empty_select(items, table)
                 if np is None:
                     # stdlib-only image: math.dist runs the 128-dim loop in C,
@@ -1735,6 +1769,10 @@ class Engine:
                             row_square = row_square[positions]
                             row_scale = float(row_square.max()) if row_square.size else 0.0
                     else:
+                        if selected is None:
+                            # No cached matrix to fall back on and no row list
+                            # was materialised; let the generic engine answer.
+                            return None
                         vectors = b"".join(row[vector_idx] for _key, row in selected)
                         matrix = np.frombuffer(vectors, dtype=np.float32).reshape(len(selected), vector_dim)
                         pk_array = np.fromiter((key for key, _row in selected), dtype=np.int64,
@@ -1747,8 +1785,14 @@ class Engine:
                         row_scale = float(row_square.max()) if row_square.size else 0.0
                     picked, distances = rank_l2(matrix, row_square, row_scale, query_vec,
                                                 pk_array, limit, descending)
-                    combined = [(float(distances[slot]), selected[int(index)])
-                                for slot, index in enumerate(picked.tolist())]
+                    if selected is None:
+                        live_rows = table["rows"]
+                        winners = pk_array[picked].tolist()
+                        combined = [(float(distances[slot]), (int(pk), live_rows[int(pk)]))
+                                    for slot, pk in enumerate(winners)]
+                    else:
+                        combined = [(float(distances[slot]), selected[int(index)])
+                                    for slot, index in enumerate(picked.tolist())]
         else:
             if limit is not None:
                 selected = selected[:limit]
