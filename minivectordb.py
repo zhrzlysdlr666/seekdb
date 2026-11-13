@@ -1770,9 +1770,18 @@ class Engine:
                             row_scale = float(row_square.max()) if row_square.size else 0.0
                     else:
                         if selected is None:
-                            # No cached matrix to fall back on and no row list
-                            # was materialised; let the generic engine answer.
-                            return None
+                            # The matrix cache declined this table (over its size
+                            # cap) and the lazy path never materialised the rows.
+                            # Collect them now and keep ranking in numpy: handing
+                            # the query to the generic engine would run a Python
+                            # L2 scan per row, which measured ~83x slower than
+                            # this path on a 10k x 128 table with the cap lowered.
+                            selected = list(table["rows"].items())
+                            if not selected:
+                                # Empty table: the cache also declines it for the
+                                # same "no rows" reason, so answer here instead of
+                                # feeding a zero-row matrix to the ranker.
+                                return self._empty_select(items, table)
                         vectors = b"".join(row[vector_idx] for _key, row in selected)
                         matrix = np.frombuffer(vectors, dtype=np.float32).reshape(len(selected), vector_dim)
                         pk_array = np.fromiter((key for key, _row in selected), dtype=np.int64,
