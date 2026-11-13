@@ -2152,6 +2152,19 @@ def emit(stream, message) -> None:
 def main() -> int:
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
+    # Diagnostics go to stderr so the judge's stdout frames stay protocol-exact.
+    try:
+        sys.stderr.write(
+            "engine: vector_path=%s numpy=%s python=%s\n"
+            % (
+                "numpy" if np is not None else "stdlib",
+                getattr(np, "__version__", "absent"),
+                "%d.%d" % sys.version_info[:2],
+            )
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
     engine = Engine(data_directory())
     emit(stdout, {"type": "ready"})
     try:
