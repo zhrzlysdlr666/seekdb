@@ -1025,6 +1025,8 @@ int ObHNSWIndexAppendBufferOperator::append_row_file(ObDDLRowFile *row_file, ObD
       } else {
         ObBatchDatumRows *datum_rows = nullptr;
         int64_t batched = 0;
+        ObString vec_str;
+        int64_t vec_vid = 0;
         while (OB_SUCC(ret)) {
           if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
             if (OB_ITER_END == ret) {
@@ -1041,11 +1043,18 @@ int ObHNSWIndexAppendBufferOperator::append_row_file(ObDDLRowFile *row_file, ObD
             const int64_t total_row_count = datum_rows->row_count_;
             for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
               row_allocator_.reuse();
-              if (vectors.at(vector_col_idx_)->is_null(i)) {
+              if (vectors.count() <= vector_col_idx_ || vectors.count() <= vector_vid_col_idx_) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("failed to get valid vector index col idx", K(ret), K(i), K(vectors.count()),
+                         K(vector_col_idx_), K(vector_vid_col_idx_));
+              } else if (vectors.at(vector_col_idx_)->is_null(i)) {
                 continue;
-              }
-              ObString vec_str = vectors.at(vector_col_idx_)->get_string(i);
-              if (OB_FAIL(read_full_lob_string(row_allocator_, ObLongTextType, CS_TYPE_BINARY, true, vec_str))) {
+              } else if (FALSE_IT(vec_vid = vectors.at(vector_vid_col_idx_)->get_int(i))) {
+                // row id must be read BEFORE the lob materialization below, exactly
+                // like append_row() does: reading the lob reuses this row's arena and
+                // can invalidate the datum buffers the id column points into.
+              } else if (FALSE_IT(vec_str = vectors.at(vector_col_idx_)->get_string(i))) {
+              } else if (OB_FAIL(read_full_lob_string(row_allocator_, ObLongTextType, CS_TYPE_BINARY, true, vec_str))) {
                 LOG_WARN("failed to read vector lob", K(ret));
               } else if (vec_str.length() == 0) {
                 continue;
@@ -1055,7 +1064,7 @@ int ObHNSWIndexAppendBufferOperator::append_row_file(ObDDLRowFile *row_file, ObD
               } else {
                 MEMCPY(reinterpret_cast<char *>(vec_buf) + batched * vec_dim_ * sizeof(float),
                        vec_str.ptr(), vec_dim_ * sizeof(float));
-                vid_buf[batched] = vectors.at(vector_vid_col_idx_)->get_int(i);
+                vid_buf[batched] = vec_vid;
                 ++batched;
                 if (batched == ddl_vec_batch) {
                   if (OB_FAIL(adaptor_guard.get_adatper()->add_snap_index(
