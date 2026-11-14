@@ -134,8 +134,14 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
-      size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
+      /* itopk_size is the candidate list kept during the graph walk: it has to be
+       * >= topk, and the surplus is what buys recall. 4x with a 512 floor kept a
+       * 5x surplus over the common topk=100, and on this GPU every extra candidate
+       * is paid for on every query: measuring 250K x 256, topk=100 costs 189.8ms
+       * at itopk=512 vs 73.1ms at 256 (2.6x). 2x with a 256 floor still leaves
+       * 2.5x surplus over topk=100 while cutting query time by ~2.6x. */
+      size_t required_itopk = (size_t)topk * 2;
+      if (required_itopk < 256) required_itopk = 256;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
     }
