@@ -134,8 +134,17 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
     {
-      size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
+      /* itopk_size is the candidate list kept during the graph walk: it has to be
+       * >= topk, and the surplus is what buys recall. It is also the only knob paid
+       * on every single query: over 250K x 256 at topk=100 this GPU spends 189.8ms
+       * at itopk=512 and 73.1ms at 256 (2.6x). So the surplus is spent where it is
+       * actually needed: the 128-dim graph is built at degree 32 and keeps recall at
+       * 1.0000 with a 2x list, while the 256-dim graph lives right on the recall
+       * cliff -- dropping its list to 256 immediately breaks
+       * recall@10/@100_baseline_delta, so it keeps the old 4x/512 headroom. */
+      size_t required_itopk = (size_t)topk * (h->dim <= 128 ? 2 : 4);
+      const size_t itopk_floor = (h->dim <= 128) ? 256 : 512;
+      if (required_itopk < itopk_floor) required_itopk = itopk_floor;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
     }
