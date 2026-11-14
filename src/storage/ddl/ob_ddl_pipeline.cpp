@@ -26,6 +26,7 @@
 #include "storage/tx_storage/ob_ls_service.h"
 #include "query/engine/expr/ob_expr_lob_utils.h"
 #include "query/engine/expr/ob_array_expr_utils.h"
+#include "lib/allocator/page_arena.h"
 
 using namespace oceanbase::storage;
 using namespace oceanbase::common;
@@ -962,24 +963,117 @@ int ObHNSWIndexAppendBufferOperator::append_row(
 int ObHNSWIndexAppendBufferOperator::append_row_file(ObDDLRowFile *row_file, ObDDLTabletContext *tablet_context)
 {
   int ret = OB_SUCCESS;
-  ObBatchDatumRows *datum_rows = nullptr;
-  if (OB_ISNULL(row_file) || OB_ISNULL(tablet_context)) {
+  // [AMD/cuvs] The offline DDL row stream used to hand the vector index exactly
+  // one row per add_snap_index() call. For the GPU backend that call only stages
+  // a single vector into the CAGRA input buffer, so the per-call CPU work
+  // (adapter guard, LOB materialization, allocator reuse) ends up costing more
+  // than the graph build it is supposed to accelerate -- which is why the build
+  // speedup measured on the CAGRA API alone never shows up end-to-end. When the
+  // index carries no extra columns the rows can simply be regrouped and pushed
+  // through one add_snap_index() call per batch. Setup-style indexes (extra
+  // columns present) keep the original row-at-a-time path.
+  const bool can_batch = 0 == extra_column_idx_types_.count() && vec_dim_ > 0 &&
+                         vector_col_idx_ >= 0 && vector_vid_col_idx_ >= 0;
+  if (OB_ISNULL(row_file) || OB_ISNULL(tablet_context) || OB_ISNULL(tablet_context->vector_index_ctx_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), KP(row_file), KP(tablet_context));
-  }
-  while (OB_SUCC(ret)) {
-    if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
-      if (OB_ITER_END == ret) {
-        ret = OB_SUCCESS;
-        break;
+  } else if (!can_batch) {
+    ObBatchDatumRows *datum_rows = nullptr;
+    while (OB_SUCC(ret)) {
+      if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          break;
+        } else {
+          LOG_WARN("get next batch failed", K(ret));
+        }
+      } else if (OB_ISNULL(datum_rows)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("null datum rows", K(ret));
       } else {
-        LOG_WARN("get next batch failed", K(ret));
+        const ObArray<common::ObIVector *> &vectors = datum_rows->vectors_;
+        const int64_t total_row_count = datum_rows->row_count_;
+        for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
+          if (OB_FAIL(append_row(i, vectors, tablet_context))) {
+          }
+        }
       }
+    }
+  } else {
+    const int64_t ddl_vec_batch = 1024;
+    ObIVectorIndexRuntime *vec_index_service =
+        ::oceanbase::share::server_service<::oceanbase::storage::ObIVectorIndexRuntime>();
+    ObPluginVectorIndexAdapterGuard adaptor_guard;
+    if (OB_ISNULL(vec_index_service)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, vector index service is nullptr", K(ret));
+    } else if (OB_FAIL(vec_index_service->acquire_adapter_guard(tablet_id_,
+                   ObIndexType::INDEX_TYPE_VEC_INDEX_SNAPSHOT_DATA_LOCAL, adaptor_guard,
+                   &tablet_context->vector_index_ctx_->vec_idx_param_,
+                   tablet_context->vector_index_ctx_->vec_dim_))) {
+      LOG_WARN("failed to acquire vector index adaptor guard", K(ret));
+    } else if (OB_ISNULL(adaptor_guard.get_adatper())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, vector adaptor is nullptr", K(ret));
     } else {
-      const ObArray<common::ObIVector *> &vectors = datum_rows->vectors_;
-      const int64_t total_row_count = datum_rows->row_count_;
-      for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
-        if (OB_FAIL(append_row(i, vectors, tablet_context))) {
+      ObArenaAllocator batch_alloc("VecDdlBatch", OB_MALLOC_NORMAL_BLOCK_SIZE);
+      float *vec_buf = static_cast<float *>(batch_alloc.alloc(sizeof(float) * vec_dim_ * ddl_vec_batch));
+      int64_t *vid_buf = static_cast<int64_t *>(batch_alloc.alloc(sizeof(int64_t) * ddl_vec_batch));
+      if (OB_ISNULL(vec_buf) || OB_ISNULL(vid_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate ddl vector batch", K(ret), K(vec_dim_));
+      } else {
+        ObBatchDatumRows *datum_rows = nullptr;
+        int64_t batched = 0;
+        while (OB_SUCC(ret)) {
+          if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
+            if (OB_ITER_END == ret) {
+              ret = OB_SUCCESS;
+              break;
+            } else {
+              LOG_WARN("get next batch failed", K(ret));
+            }
+          } else if (OB_ISNULL(datum_rows)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("null datum rows", K(ret));
+          } else {
+            const ObArray<common::ObIVector *> &vectors = datum_rows->vectors_;
+            const int64_t total_row_count = datum_rows->row_count_;
+            for (int64_t i = 0; OB_SUCC(ret) && i < total_row_count; ++i) {
+              row_allocator_.reuse();
+              if (vectors.at(vector_col_idx_)->is_null(i)) {
+                continue;
+              }
+              ObString vec_str = vectors.at(vector_col_idx_)->get_string(i);
+              if (OB_FAIL(read_full_lob_string(row_allocator_, ObLongTextType, CS_TYPE_BINARY, true, vec_str))) {
+                LOG_WARN("failed to read vector lob", K(ret));
+              } else if (vec_str.length() == 0) {
+                continue;
+              } else if (vec_str.length() != vec_dim_ * static_cast<int64_t>(sizeof(float))) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("unexpected vector length", K(ret), K(vec_str.length()), K(vec_dim_));
+              } else {
+                MEMCPY(reinterpret_cast<char *>(vec_buf) + batched * vec_dim_ * sizeof(float),
+                       vec_str.ptr(), vec_dim_ * sizeof(float));
+                vid_buf[batched] = vectors.at(vector_vid_col_idx_)->get_int(i);
+                ++batched;
+                if (batched == ddl_vec_batch) {
+                  if (OB_FAIL(adaptor_guard.get_adatper()->add_snap_index(
+                                 vec_buf, vid_buf, nullptr, 0, static_cast<int>(batched)))) {
+                    LOG_WARN("failed to append one ddl vector batch", K(ret), K(batched));
+                  } else {
+                    batched = 0;
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && batched > 0) {
+          if (OB_FAIL(adaptor_guard.get_adatper()->add_snap_index(
+                         vec_buf, vid_buf, nullptr, 0, static_cast<int>(batched)))) {
+            LOG_WARN("failed to append the trailing ddl vector batch", K(ret), K(batched));
+          }
         }
       }
     }
