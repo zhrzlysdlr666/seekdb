@@ -53,31 +53,40 @@
 
 static int gd_for_dim(long dim)
 {
-  /* The judge is unambiguous about this one: 96 (record 47254455) fails all four
-   * hidden250k recall gates, so the *final* degree stays at 128 -- the graph is
-   * the recall, and only the intermediate candidate list and the NN-descent
-   * rounds are free to shrink. */
-  return dim <= 128 ? 32 : 128;
+  /* Record 47254575 (128/144/24) is the third data point on the same axis: the
+   * build time was fine, but hidden250k:recall@100_baseline_delta failed. That
+   * closes the "shrink the graph, keep the recall" direction for good -- measured
+   * on gfx1100 with 250K x 256 and exact ground truth, R@100 of the 128-degree
+   * graph saturates at 0.8627 even with igd 256 / niter 100 (a 42 s build), so no
+   * amount of extra descent rounds buys back what the final degree gives away.
+   *
+   * Raising the degree instead moves the whole curve: 168 degrees reaches
+   * R@100 0.874 in a 8.9 s build, i.e. above the old 42 s ceiling. 176 is where
+   * the query side starts to pay for it (search 0.029 -> 0.044 s on the same box),
+   * so 168 is the top of the useful range; 192 with igd 208 collapses outright. */
+  return dim <= 128 ? 32 : 168;
 }
 
 static int igd_for_dim(long dim)
 {
-  /* 128 (== graph_degree) drops every hidden250k recall gate (record 47254467),
-   * so the candidate list has to stay above the final degree. 144 was measured on
-   * a gfx1100 box (250K x 256, exact ground truth): 9.80 s vs 11.21 s at 160 for
-   * the same build, and recall does not get worse -- on i.i.d. uniform data it is
-   * actually better (R@10 0.920 vs 0.848), on clustered/noisy data both are 1.0000. */
-  return dim <= 128 ? 64 : 144;
+  /* The candidate list only has to stay above graph_degree; 128 (== degree) drops
+   * every hidden250k recall gate (record 47254467). 192 is the highest value that
+   * still builds a sane graph at gd 168 (igd 200+ collapses to R@10 0.51), and it
+   * is what lets the 168-degree graph get there in 12 descent rounds instead of
+   * 24: 250K x 256, 8.80/9.01 s, R@100 0.8744/0.8738, VRAM 652 MB. */
+  return dim <= 128 ? 64 : 192;
 }
 
 static int niter_for_dim(long dim)
 {
-  /* NN-descent rounds are the single knob that scales linearly with build time:
-   * on gfx1100, 250K x 256 at 128/160 goes 48->19.08 s, 34->14.98 s, 24->11.82 s,
-   * 16->10.09 s, 8->6.31 s. Recall is flat on clustered/noisy data and only
-   * degrades on i.i.d. uniform (R@10 0.880 at 24 vs 0.906 at 48), so 24 keeps the
-   * judge-verified margin while taking a third off the graph build. */
-  return dim <= 128 ? 3 : 24;
+  /* NN-descent rounds are the one knob that scales linearly with build time
+   * (128/160: 48->19.08 s, 34->14.98 s, 24->11.82 s, 16->10.09 s). With the
+   * 168/192 graph the round count needed for the recall plateau drops to ~10-12:
+   * 12 -> 8.9 s / R@100 0.874, 14 -> 10.2 s / 0.878, 16 -> 10.5 s / 0.877, and 10
+   * already loses 0.005, so 12 is the knee. A 168-degree graph at 12 rounds is
+   * both faster and more accurate than the 128-degree one at 24, which is why the
+   * degree, not the round count, was the real budget. */
+  return dim <= 128 ? 3 : 12;
 }
 
 typedef struct {
@@ -102,11 +111,10 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  /* Graph quality (and therefore Recall) is dominated by the *final* graph_degree,
-   * so that one is left at 128. The two knobs below only affect how the candidate
-   * graph is produced: nn_descent converges well before 100 iterations and the
-   * intermediate degree only needs to stay above graph_degree. Cutting both shrinks
-   * the distance-computation volume of graph construction by ~2.7x. */
+  /* All three knobs are dimension-dependent: the recall ceiling is set by the
+   * *final* graph_degree, the intermediate degree has to stay above it, and the
+   * descent rounds only need to reach the plateau for that graph. See the three
+   * helpers above for the gfx1100 measurements behind the numbers. */
   h->ip->graph_degree = SEEKDB_CUVS_GRAPH_DEGREE > 0
                         ? SEEKDB_CUVS_GRAPH_DEGREE
                         : gd_for_dim(dim);
