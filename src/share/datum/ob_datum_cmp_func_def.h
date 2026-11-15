@@ -382,11 +382,31 @@ struct ObDatumStrCmpImpl
   }
 };
 
+// binary collation 的比较就是 memcmp + 长度差，而 CS_TYPE 是编译期常量，
+// 所以在比较器内部直接算完，省掉一次 ObCharset::strcmpsp（参数校验/查表/间接调用）。
+// null 不在这里处理：万一传进来则回落到通用实现，行为与改动前一致。
+static inline int ob_datum_binary_cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret)
+{
+  const int64_t cmp_len = l.len_ < r.len_ ? l.len_ : r.len_;
+  int cmp = 0;
+  if (cmp_len > 0) {
+    cmp = memcmp(l.ptr_, r.ptr_, static_cast<size_t>(cmp_len));
+  }
+  if (0 == cmp) {
+    cmp = static_cast<int>(l.len_ - r.len_);
+  }
+  cmp_ret = cmp > 0 ? 1 : (cmp < 0 ? -1 : 0);
+  return OB_SUCCESS;
+}
+
 template <ObCollationType CS_TYPE, bool WITH_END_SPACE>
 struct ObDatumStrCmp : public ObDefined<SupportedCollection<CS_TYPE>::defined_>
 {
   inline static int cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret)
   {
+    if (CS_TYPE_BINARY == CS_TYPE && !l.is_null() && !r.is_null()) {
+      return ob_datum_binary_cmp(l, r, cmp_ret);
+    }
     return ObDatumStrCmpImpl::cmp(l, r, cmp_ret, CS_TYPE, WITH_END_SPACE);
   }
 };
