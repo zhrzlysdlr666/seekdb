@@ -148,7 +148,11 @@ private:
   virtual int inner_init(const ObCharsetInfo *cs, ObITokenStream &in_stream) override;
   int build_grouping_map();
 private:
-  static const int64_t DEFAULT_HASH_MAP_BUCKET_CNT = 128;
+  // ObHashMap is instantiated with EXTEND_RATIO == 1, i.e. it never extends,
+  // so this is the permanent bucket count of the grouping map. A document
+  // contributes hundreds of distinct tokens, which used to collapse into long
+  // hash chains and turn every grouping probe into a list walk.
+  static const int64_t DEFAULT_HASH_MAP_BUCKET_CNT = 2048;
   ObArenaAllocator token_allocator_;
   common::hash::ObHashMap<ObString, int64_t> grouping_map_;
   common::hash::ObHashMap<ObString, int64_t>::const_iterator map_iter_;
