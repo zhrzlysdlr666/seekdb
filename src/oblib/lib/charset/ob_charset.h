@@ -405,6 +405,81 @@ enum ObNLSCollation
 
 const char *ob_collation_type_str(ObCollationType collation_type);
 
+// utf8mb4_general_ci 的排序权重事实（已逐项验证）：
+//  - ASCII 段（0x00-0x7F）的 128 个 sort 权重严格等于大写折叠；
+//  - 0x40-0x9F 页在 ob_unicase_pages_default 中全部为 NULL，U+4E00-U+9FFF 的
+//    权重等于码点，而 UTF-8 三字节序列的字节序与码点序一致。
+// 因此「只含 ASCII 或三字节汉字」的串可以逐字符算权重比较，结果与原实现逐字节一致；
+// 遇到其它字符（两/四字节、全角、组合符等）立刻放弃，交给通用路径。
+static inline bool ob_ci_fast_weight(const unsigned char *s, size_t len, size_t &pos, uint32_t &weight)
+{
+  const unsigned char b0 = s[pos];
+  if (b0 < 0x80) {
+    weight = (b0 >= 'a' && b0 <= 'z') ? static_cast<uint32_t>(b0 - 32) : static_cast<uint32_t>(b0);
+    pos += 1;
+    return true;
+  }
+  if (b0 < 0xE4 || b0 > 0xE9 || pos + 2 >= len) {
+    return false;
+  }
+  const unsigned char b1 = s[pos + 1];
+  const unsigned char b2 = s[pos + 2];
+  if (0x80 != (b1 & 0xC0) || 0x80 != (b2 & 0xC0)) {
+    return false;
+  }
+  weight = (static_cast<uint32_t>(b0) << 16) | (static_cast<uint32_t>(b1) << 8)
+           | static_cast<uint32_t>(b2);
+  pos += 3;
+  return true;
+}
+
+// 返回 true 表示结果已算出（res 有效）；false 表示必须走通用 compare。
+// 只在两侧都非空、都不以空格结尾、且全程只含 ASCII/三字节汉字时给出结论：
+// 尾空格在 strnncollsp 里有特殊语义，不在这里处理。
+static inline bool ob_ci_strnncollsp_fast(const char *s, int64_t slen,
+                                         const char *t, int64_t tlen,
+                                         int &res)
+{
+  if (slen <= 0 || tlen <= 0 || nullptr == s || nullptr == t) {
+    return false;
+  }
+  const unsigned char *src = reinterpret_cast<const unsigned char *>(s);
+  const unsigned char *dst = reinterpret_cast<const unsigned char *>(t);
+  const size_t srclen = static_cast<size_t>(slen);
+  const size_t dstlen = static_cast<size_t>(tlen);
+  if (' ' == src[srclen - 1] || ' ' == dst[dstlen - 1]) {
+    return false;
+  }
+  size_t s_pos = 0;
+  size_t d_pos = 0;
+  while (s_pos < srclen && d_pos < dstlen) {
+    uint32_t s_weight = 0;
+    uint32_t d_weight = 0;
+    if (!ob_ci_fast_weight(src, srclen, s_pos, s_weight)
+        || !ob_ci_fast_weight(dst, dstlen, d_pos, d_weight)) {
+      return false;
+    }
+    if (s_weight != d_weight) {
+      res = s_weight < d_weight ? -1 : 1;
+      return true;
+    }
+  }
+  if (s_pos == srclen && d_pos == dstlen) {
+    res = 0;
+    return true;
+  }
+  // 一方是另一方的前缀：填充语义下用空格（权重 0x20）与剩余字符比较。
+  // 剩余首字节权重必然 >= 0x20 才能断定「短的小」，否则交给通用路径。
+  if (s_pos == srclen) {
+    if (dst[d_pos] < 0x20) { return false; }
+    res = -1;
+    return true;
+  }
+  if (src[s_pos] < 0x20) { return false; }
+  res = 1;
+  return true;
+}
+
 class ObCharset
 {
 private:
