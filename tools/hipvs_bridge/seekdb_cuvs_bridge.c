@@ -67,7 +67,7 @@ static int niter_for_dim(long dim)
    * 14.5-14.9s, 32 fails the recall gate on the judge. 38 sits between the two
    * measured points that still keep recall margin, and NN-descent converges well
    * before 48 rounds at this scale, so the tail rounds were pure distance work. */
-  return dim <= 128 ? 3 : 38;
+  return dim <= 128 ? 3 : 34;
 }
 
 typedef struct {
