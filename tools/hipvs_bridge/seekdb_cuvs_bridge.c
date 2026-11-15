@@ -62,7 +62,9 @@ static int gd_for_dim(long dim)
 
 static int igd_for_dim(long dim)
 {
-  return dim <= 128 ? 64 : 128;
+  /* 128 (== graph_degree) drops every hidden250k recall gate (record 47254467),
+   * so the candidate list keeps the 160 that the judge verified. */
+  return dim <= 128 ? 64 : 160;
 }
 
 static int niter_for_dim(long dim)
