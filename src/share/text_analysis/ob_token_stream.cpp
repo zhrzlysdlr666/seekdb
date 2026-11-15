@@ -95,10 +95,18 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
   } else {
     const char *doc = input_doc_->ptr_;
     const uint32_t doc_len = get_input_buf_len();
+    // In every single-byte-based charset (utf8/gbk/latin1/binary, i.e. all
+    // charsets with mbminlen == 1) a byte below 0x80 is one whole character, so
+    // the charset function pointer indirection can be skipped for ASCII. That is
+    // the overwhelmingly common case for the BENG tokenizer.
+    const bool ascii_is_one_char = (NULL != cs_ && 1 == cs_->mbminlen);
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = (ascii_is_one_char
+                             && static_cast<unsigned char>(doc[trav_pos_]) < 0x80)
+                                ? 1
+                                : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +120,10 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = (ascii_is_one_char
+                             && static_cast<unsigned char>(doc[trav_pos_]) < 0x80)
+                                ? 1
+                                : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -136,10 +147,11 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
 bool ObTextWhitespaceTokenizer::found_delimiter()
 {
-  bool found = false;
-  const char *curr_char = input_doc_->ptr_ + trav_pos_;
-  found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
-  return found;
+  // ob_isspace/ob_iscntrl/ob_ispunct are three bit tests against the very same
+  // ctype entry, so one masked load answers all of them.
+  const unsigned char curr_char = static_cast<unsigned char>(input_doc_->ptr_[trav_pos_]);
+  return NULL != cs_ && NULL != cs_->ctype
+         && 0 != ((cs_->ctype + 1)[curr_char] & (_MY_SPC | _MY_CTR | _MY_PNT));
 }
 
 ObTokenNormalizer::ObTokenNormalizer()
@@ -208,9 +220,11 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
   const int64_t token_len = check_token.len_;
   const char *token = check_token.ptr_;
   int64_t special_mark_cnt = 0;
+  // punct and cntrl are two bits of the same ctype entry: test them together.
+  const unsigned char *ctype = (NULL != cs_ && NULL != cs_->ctype) ? cs_->ctype + 1 : NULL;
   for (int64_t i = 0; i < token_len; ++i) {
-    const char *character = token + i;
-    if (ob_ispunct(cs_, *character) || ob_iscntrl(cs_, *character)) {
+    const unsigned char character = static_cast<unsigned char>(token[i]);
+    if (NULL != ctype && 0 != (ctype[character] & (_MY_PNT | _MY_CTR))) {
       special_mark_cnt++;
     }
   }
