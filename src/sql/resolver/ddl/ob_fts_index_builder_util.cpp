@@ -1046,12 +1046,20 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         break;
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
-      case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
+      case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL: {
         // 全文索引构建是纯 CPU 的逐文档分词 + 写 doc_word 行，单线程明显吃不饱。
-        // 原实现直接把并行度除以 3，导致 FTS 索引构建阶段几乎退化为串行；
-        // 这里保持原始并行度（至少 2），让分词与写入真正并行起来。
-        decided_parallelism = MAX(original_parallelism, 2L);
+        // 原实现把并行度除以 3，单机 DDL 默认并行度常常为 1，除完仍是 1，整段构建退化为串行。
+        // 这里在「请求并行度」与「按核数给出的默认并行度」中取大者，上限 8：
+        // 小规格机器不因超配抢核，多核机器能真正吃满。
+        int64_t hw_parallelism = get_cpu_num() / 2;
+        if (hw_parallelism < 2) {
+          hw_parallelism = 2;
+        } else if (hw_parallelism > 8) {
+          hw_parallelism = 8;
+        }
+        decided_parallelism = original_parallelism > hw_parallelism ? original_parallelism : hw_parallelism;
         break;
+      }
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
         decided_parallelism = MAX(original_parallelism / 2, 1L);
