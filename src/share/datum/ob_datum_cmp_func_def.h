@@ -387,13 +387,32 @@ struct ObDatumStrCmpImpl
 // null 不在这里处理：万一传进来则回落到通用实现，行为与改动前一致。
 static inline int ob_datum_binary_cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret)
 {
-  const int64_t cmp_len = l.len_ < r.len_ ? l.len_ : r.len_;
+  const int64_t llen = l.len_;
+  const int64_t rlen = r.len_;
+  const int64_t cmp_len = llen < rlen ? llen : rlen;
   int cmp = 0;
-  if (cmp_len > 0) {
+  if (OB_LIKELY(cmp_len <= 8)) {
+    // 词条/rowkey 绝大多数不超过 8 字节：一次定长读 + 字节序翻转即可完成比较，
+    // 省掉 memcmp 的调用与长度分派。
+    if (cmp_len > 0) {
+      uint64_t lv = 0;
+      uint64_t rv = 0;
+      memcpy(&lv, l.ptr_, static_cast<size_t>(cmp_len));
+      memcpy(&rv, r.ptr_, static_cast<size_t>(cmp_len));
+      lv = __builtin_bswap64(lv);
+      rv = __builtin_bswap64(rv);
+      if (lv != rv) {
+        cmp = lv < rv ? -1 : 1;
+      }
+    }
+    if (0 == cmp) {
+      cmp = static_cast<int>(llen - rlen);
+    }
+  } else {
     cmp = memcmp(l.ptr_, r.ptr_, static_cast<size_t>(cmp_len));
-  }
-  if (0 == cmp) {
-    cmp = static_cast<int>(l.len_ - r.len_);
+    if (0 == cmp) {
+      cmp = static_cast<int>(llen - rlen);
+    }
   }
   cmp_ret = cmp > 0 ? 1 : (cmp < 0 ? -1 : 0);
   return OB_SUCCESS;
