@@ -419,3 +419,33 @@ find . -path ./deps/3rd -prune -o -type f \( -name '*.sh' -o -name '*.deps' -o -
 sed -i '51s/^obshell/#SKIP-obshell/' deps/init/oceanbase.el9.x86_64.deps                    # 该包在 community/el8 已 404
 ./build.sh release --init && cd build_release && make -j12 seekdb                            # 约 11 分钟；增量 30 秒
 ```
+
+### 10.6 256 维侧的可用参数是被召回门禁焊死的
+
+这一轮把 256 维侧的旋钮逐个撞了一遍，结论很清楚：
+
+| 版本 | 256d 参数（gd/igd/niter/itopk） | 构图算法 | build | gates |
+| --- | --- | --- | ---: | --- |
+| v20 | 128 / 160 / 34 / 512 | NN-descent | **2.533x** | pass |
+| v21 | 96 / 128 / 34 / 768 | NN-descent | — | 四条 recall 全挂 |
+| v22 | 128 / **128** / 34 / 768 | NN-descent | — | 四条 recall 全挂 |
+| v23 | 128 / 128 / 34 / 768 | **IVF-PQ** | — | `relative_vram_limit` + 四条 recall |
+
+- **`graph_degree=128` 不能动**：降到 96 立刻四条 recall 门禁全挂（`recall@10_minimum` 都保不住）。
+- **`intermediate_graph_degree=160` 也不能动**：降到 128（== gd）同样四条全挂。
+- **IVF-PQ 构图不可用**：判题另外还报了 `relative_vram_limit`，即这条路径的显存峰值本身就越界。
+- 于是 256 维侧只剩 `niter` 可调，而 niter 48→34 只值 +0.06（在 ±8% 采样噪声内）。
+
+**最终战绩：v20 = 17.846 / 20（build 2.533x、query 2.362x、gates pass）。**
+计分项里查询侧已经拿满（2 分），剩下的 2.15 分要求 build 从 2.533 走到 3.0，
+也就是 256 维侧再快 26%；在 (128/160) 这套图参数被召回焊死之后，这个差距只能靠
+"换一种更便宜的构图方式"来补，而 IVF-PQ 又被显存门禁挡掉 —— 这是当前架构下的天花板。
+
+### 10.7 三轮下来的净收益
+
+| 阶段 | 关键改动 | 分数 |
+| --- | --- | ---: |
+| 起点（v10） | 维度分档 gd/igd/niter | 14.753 |
+| v13 | DDL 行流 1024 行批量 + vid 读取顺序 | 15.46 |
+| v17 | 行流常驻内存（512KB → 512MB，不再 spool 落盘） | 16.541 |
+| **v20** | **每个索引一个常驻大栈查询工作线程 + niter 34** | **17.846** |
