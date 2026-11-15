@@ -372,6 +372,37 @@ int __attribute__ ((noinline))  ob_strnncollsp_utf8mb4_help(
   return 0;
 }
 
+// 比较快速路径：把「ASCII + 三字节汉字」就地映射成排序权重。
+//
+// utf8mb4_general_ci 的权重来自 ob_unicase_pages_default 二级表：
+//   * ASCII 段 0x00..0x7F 的 sort 值恒等于「大写折叠」（a-z 折成 A-Z，其余保持原值），
+//   * 0x40..0x9F 这些页全部为 NULL，即 U+4000..U+9FFF 的排序权重就等于码点本身。
+// 所以这两类字符的权重可以就地算出：ASCII 用大写折叠值，汉字用三个字节拼成的整数
+// （UTF-8 的字节序与码点序一致，该整数的大小关系等同码点大小关系）。
+// 其余字符（两字节、四字节，以及 0x1E/0x1F/0x21/0x24/0xFF 等有映射的页）一律返回
+// false，交由通用路径处理，从而保证比较语义与原实现完全等价。
+static inline bool ob_fast_weight(const unsigned char *s, size_t len, size_t &pos, uint32_t &weight)
+{
+  const unsigned char b0 = s[pos];
+  if (b0 < 0x80) {
+    weight = (b0 >= 'a' && b0 <= 'z') ? static_cast<uint32_t>(b0 - 32) : static_cast<uint32_t>(b0);
+    pos += 1;
+    return true;
+  }
+  if (b0 < 0xE4 || b0 > 0xE9 || pos + 2 >= len) {
+    return false;
+  }
+  const unsigned char b1 = s[pos + 1];
+  const unsigned char b2 = s[pos + 2];
+  if (0x80 != (b1 & 0xC0) || 0x80 != (b2 & 0xC0)) {
+    return false;
+  }
+  weight = (static_cast<uint32_t>(b0) << 16) | (static_cast<uint32_t>(b1) << 8)
+           | static_cast<uint32_t>(b2);
+  pos += 3;
+  return true;
+}
+
 static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
                        const unsigned char *src, size_t srclen,
                        const unsigned char *dst, size_t dstlen,
@@ -381,6 +412,31 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   ob_wc_t src_wc = 0, dst_wc = 0;
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
+  // 快速路径：两侧都只含 ASCII 或三字节汉字，且都不以空格结尾
+  // （尾空格由 strnncollsp 特殊处理，交给通用路径）。中途遇到不支持的字符则
+  // 直接落到下面的通用循环，src/dst/se/te 均未被修改，行为与原实现一致。
+  if (srclen > 0 && dstlen > 0 && ' ' != src[srclen - 1] && ' ' != dst[dstlen - 1]) {
+    size_t s_pos = 0;
+    size_t d_pos = 0;
+    bool fast_ok = true;
+    while (fast_ok && s_pos < srclen && d_pos < dstlen) {
+      uint32_t s_weight = 0;
+      uint32_t d_weight = 0;
+      if (!ob_fast_weight(src, srclen, s_pos, s_weight)
+          || !ob_fast_weight(dst, dstlen, d_pos, d_weight)) {
+        fast_ok = false;
+      } else if (s_weight != d_weight) {
+        return s_weight < d_weight ? -1 : 1;
+      }
+    }
+    if (fast_ok) {
+      if (s_pos == srclen && d_pos == dstlen) {
+        return 0;
+      } else {
+        return s_pos == srclen ? -1 : 1;
+      }
+    }
+  }
   while ( src < se && dst < te ) {
     int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
     int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
