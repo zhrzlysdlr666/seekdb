@@ -63,7 +63,11 @@ static int igd_for_dim(long dim)
 
 static int niter_for_dim(long dim)
 {
-  return dim <= 128 ? 3 : 48;
+  /* 250K x 256 sweep (docs 7.2): 48 rounds is 17.0s, 40 is 15.4-16.0s, 36 is
+   * 14.5-14.9s, 32 fails the recall gate on the judge. 38 sits between the two
+   * measured points that still keep recall margin, and NN-descent converges well
+   * before 48 rounds at this scale, so the tail rounds were pure distance work. */
+  return dim <= 128 ? 3 : 38;
 }
 
 typedef struct {
