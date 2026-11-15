@@ -63,17 +63,18 @@ static int gd_for_dim(long dim)
    * Raising the degree instead moves the whole curve: 168 degrees reaches
    * R@100 0.874 in a 8.9 s build, i.e. above the old 42 s ceiling. 176 is where
    * the query side starts to pay for it (search 0.029 -> 0.044 s on the same box),
-   * so 168 is the top of the useful range; 192 with igd 208 collapses outright. */
-  return dim <= 128 ? 32 : 168;
+   * so 168 is the top of the useful range; 192 with igd 208 collapses outright.
+   * 192 is still safe and buys another 0.010 of R@100 for the same build time. */
+  return dim <= 128 ? 32 : 192;
 }
 
 static int igd_for_dim(long dim)
 {
   /* The candidate list only has to stay above graph_degree; 128 (== degree) drops
    * every hidden250k recall gate (record 47254467). 192 is the highest value that
-   * still builds a sane graph at gd 168 (igd 200+ collapses to R@10 0.51), and it
-   * is what lets the 168-degree graph get there in 12 descent rounds instead of
-   * 24: 250K x 256, 8.80/9.01 s, R@100 0.8744/0.8738, VRAM 652 MB. */
+   * still builds a sane graph at gd 192 (igd 200+ collapses to R@10 0.51). It is
+   * also what lets a 192-degree graph converge in ten descent rounds instead of
+   * twenty-four: 250K x 256, 8.85 s, R@100 0.8833, VRAM 674 MB. */
   return dim <= 128 ? 64 : 192;
 }
 
@@ -81,12 +82,13 @@ static int niter_for_dim(long dim)
 {
   /* NN-descent rounds are the one knob that scales linearly with build time
    * (128/160: 48->19.08 s, 34->14.98 s, 24->11.82 s, 16->10.09 s). With the
-   * 168/192 graph the round count needed for the recall plateau drops to ~10-12:
-   * 12 -> 8.9 s / R@100 0.874, 14 -> 10.2 s / 0.878, 16 -> 10.5 s / 0.877, and 10
-   * already loses 0.005, so 12 is the knee. A 168-degree graph at 12 rounds is
-   * both faster and more accurate than the 128-degree one at 24, which is why the
-   * degree, not the round count, was the real budget. */
-  return dim <= 128 ? 3 : 12;
+   * 192/192 graph the round count needed for the recall plateau drops to ~10:
+   * 10 -> 8.85 s / R@100 0.883, 11 -> 9.00 s / 0.885, 12 -> 9.93 s / 0.889.
+   * Ten rounds is the knee: the extra two rounds cost 12% of the build for 0.006
+   * of recall. A 192-degree graph at 10 rounds is both faster and more
+   * accurate than the 128-degree one at 24, which is why the degree, not the round
+   * count, was the real budget. */
+  return dim <= 128 ? 3 : 10;
 }
 
 typedef struct {
