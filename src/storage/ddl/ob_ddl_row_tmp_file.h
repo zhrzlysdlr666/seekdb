@@ -116,7 +116,12 @@ public:
                                 ObDDLChunk &output_chunk);
 
 public:
-  static const int64_t ROW_FILE_MEMORY_LIMIT = 512L * 1024L;
+  // [AMD/cuvs] The row stream that feeds the vector index used to keep only 512KB
+  // resident and dump everything else to a temp file, so a 250k x 256d build wrote
+  // and then re-read the whole 256MB vector column through the temp store. The
+  // resident limit is per row file, so a larger limit only trades buffering memory
+  // for the disk round trip.
+  static const int64_t ROW_FILE_MEMORY_LIMIT = 512L * 1024L * 1024L;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObDDLRowFileGenerator);
