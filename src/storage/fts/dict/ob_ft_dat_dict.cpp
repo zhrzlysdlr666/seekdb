@@ -355,7 +355,16 @@ size_t ObArrayHashMap::estimate_size(size_t word_num)
 size_t ObArrayHashMap::estimate_capacity(size_t word_num)
 {
   constexpr size_t MIN_CAPACITY = 101;                   // prime
+  constexpr size_t PROBE_STEP = 3;
   size_t capacity = MAX(word_num * 4 / 3, MIN_CAPACITY); // 75%
+  // find()/insert() advance by PROBE_STEP, so the probe sequence only covers
+  // capacity / gcd(capacity, PROBE_STEP) distinct slots. When the capacity is a
+  // multiple of 3 that degenerates to a single residue class (a third of the
+  // table is reachable), which triples the average chain length and can even
+  // make insert() spin forever once that class is full. Keep it coprime.
+  while (0 == capacity % PROBE_STEP) {
+    ++capacity;
+  }
   return capacity;
 }
 } //  namespace storage
