@@ -25,6 +25,7 @@
 #include "data_plane/fts/ob_fts_parser_helper.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_utils.h"
+#include "lib/utility/utility.h" // common::get_cpu_num()
 
 namespace oceanbase
 {
@@ -1048,9 +1049,12 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
         // 全文索引构建是纯 CPU 的逐文档分词 + 写 doc_word 行，单线程明显吃不饱。
-        // 原实现直接把并行度除以 3，导致 FTS 索引构建阶段几乎退化为串行；
-        // 这里保持原始并行度（至少 2），让分词与写入真正并行起来。
-        decided_parallelism = MAX(original_parallelism, 2L);
+        // 原实现直接把并行度除以 3，导致 FTS 索引构建阶段几乎退化为串行。
+        // 改为在「请求并行度」与「按机器核数给出的默认并行度」中取大者：
+        // 单机 DDL 默认并行度常常是 1，只保留原始值仍然只有 2；按核数给默认值
+        // 才能真正吃满多核。上限 8 避免小规格机器上线程过多互相抢核。
+        const int64_t hw_parallelism = MIN(MAX(common::get_cpu_num() / 2, 2L), 8L);
+        decided_parallelism = MAX(original_parallelism, hw_parallelism);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
