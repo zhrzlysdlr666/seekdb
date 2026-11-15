@@ -53,12 +53,19 @@
 
 static int gd_for_dim(long dim)
 {
-  return dim <= 128 ? 32 : 128;
+  /* 256d used to keep degree 128 for recall. The graph is pruned from the
+   * intermediate candidate list, so the build cost (and the graph that gets
+   * serialized into the index) scales with both degrees. 96/128 keeps the
+   * candidate list above the final degree while cutting the prune volume by 20%
+   * and the persisted graph by 25%; the search budget is raised to match so the
+   * recall margin is paid for out of the query side, which sits well above its
+   * 1.5x cap. */
+  return dim <= 128 ? 32 : 96;
 }
 
 static int igd_for_dim(long dim)
 {
-  return dim <= 128 ? 64 : 160;
+  return dim <= 128 ? 64 : 128;
 }
 
 static int niter_for_dim(long dim)
@@ -147,7 +154,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
        * cliff -- dropping its list to 256 immediately breaks
        * recall@10/@100_baseline_delta, so it keeps the old 4x/512 headroom. */
       size_t required_itopk = (size_t)topk * (h->dim <= 128 ? 2 : 4);
-      const size_t itopk_floor = (h->dim <= 128) ? 256 : 512;
+      const size_t itopk_floor = (h->dim <= 128) ? 256 : 768;
       if (required_itopk < itopk_floor) required_itopk = itopk_floor;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
