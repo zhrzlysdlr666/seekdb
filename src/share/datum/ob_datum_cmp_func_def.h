@@ -407,6 +407,14 @@ struct ObDatumStrCmp : public ObDefined<SupportedCollection<CS_TYPE>::defined_>
     if (CS_TYPE_BINARY == CS_TYPE && !l.is_null() && !r.is_null()) {
       return ob_datum_binary_cmp(l, r, cmp_ret);
     }
+    // utf8mb4_general_ci：只含 ASCII/三字节汉字时直接内联算完（等价性见 ob_charset.h）
+    if (CS_TYPE_UTF8MB4_GENERAL_CI == CS_TYPE && !l.is_null() && !r.is_null()) {
+      int c = 0;
+      if (ob_ci_strnncollsp_fast(l.ptr_, l.len_, r.ptr_, r.len_, c)) {
+        cmp_ret = c;
+        return OB_SUCCESS;
+      }
+    }
     return ObDatumStrCmpImpl::cmp(l, r, cmp_ret, CS_TYPE, WITH_END_SPACE);
   }
 };
