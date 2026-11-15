@@ -551,6 +551,19 @@ int ObCharset::strcmp(ObCollationType collation_type,
                       int64_t str2_len)
 {
   int result = 0;
+  // BINARY collation 直通快路径：语义等价于 memcmp + 长度差
+  // （ob_strnncoll_binary / ob_strnncollsp_binary 即此实现，后者忽略空格填充标志）。
+  // 省掉 is_argument_valid 的逐项校验、get_charset 查表与一次函数指针间接调用；
+  // 参数非法时仍走原实现。
+  if (OB_LIKELY(CS_TYPE_BINARY == collation_type)
+      && nullptr != str1 && nullptr != str2 && str1_len >= 0 && str2_len >= 0) {
+    const int64_t cmp_len = str1_len < str2_len ? str1_len : str2_len;
+    int cmp = 0;
+    if (cmp_len > 0) {
+      cmp = memcmp(str1, str2, static_cast<size_t>(cmp_len));
+    }
+    return 0 != cmp ? cmp : static_cast<int>(str1_len - str2_len);
+  }
   if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
     const ObCharsetInfo *cs = get_charset(collation_type);
     const bool t_is_prefix = false;
@@ -571,6 +584,19 @@ int ObCharset::strcmpsp(ObCollationType collation_type,
                         bool cmp_endspace)
 {
   int result = 0;
+  // BINARY collation 直通快路径：语义等价于 memcmp + 长度差
+  // （ob_strnncoll_binary / ob_strnncollsp_binary 即此实现，后者忽略空格填充标志）。
+  // 省掉 is_argument_valid 的逐项校验、get_charset 查表与一次函数指针间接调用；
+  // 参数非法时仍走原实现。
+  if (OB_LIKELY(CS_TYPE_BINARY == collation_type)
+      && nullptr != str1 && nullptr != str2 && str1_len >= 0 && str2_len >= 0) {
+    const int64_t cmp_len = str1_len < str2_len ? str1_len : str2_len;
+    int cmp = 0;
+    if (cmp_len > 0) {
+      cmp = memcmp(str1, str2, static_cast<size_t>(cmp_len));
+    }
+    return 0 != cmp ? cmp : static_cast<int>(str1_len - str2_len);
+  }
   if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
     const ObCharsetInfo *cs = get_charset(collation_type);
     result = cs->coll->strnncollsp(cs,
