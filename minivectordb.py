@@ -17,6 +17,7 @@ Design
 
 from __future__ import annotations
 
+import base64
 import heapq
 import gc
 import json
@@ -41,6 +42,8 @@ FLOAT32_MAX = 3.4028234663852886e38
 INT64_MIN = -(1 << 63)
 INT64_MAX = (1 << 63) - 1
 WAL_NAME = "wal.jsonl"
+# Tag used in the on-disk row format for a packed float32 vector.
+VECTOR_TAG = "~f32"
 SNAP_NAME = "snapshot.json"
 CHECKPOINT_BYTES = 16 << 20
 # Below this row count a full scan is cheaper than materialising the buckets.
@@ -61,9 +64,16 @@ gc.set_threshold(20000, 50, 50)
 # value encoding between memory and disk
 # --------------------------------------------------------------------------- #
 def disk_value(value):
-    """Project an in-memory value into a JSON-serialisable disk value."""
+    """Project an in-memory value into a JSON-serialisable disk value.
+
+    Vectors are already packed float32 in memory, so they go to disk as the raw
+    little-endian bytes in base64 rather than a JSON array of decimals: two
+    thirds fewer bytes and one C-level call instead of a decimal float repr per
+    component. The tagged object keeps the format self-describing, and reading
+    still accepts the older plain-list form.
+    """
     if isinstance(value, array) and value.typecode == "f":
-        return value.tolist()
+        return {VECTOR_TAG: base64.b64encode(value.tobytes()).decode("ascii")}
     return value
 
 
@@ -85,7 +95,14 @@ def materialise_row(columns, values):
     """Rebuild an in-memory row: vector slots become compact float32 arrays."""
     row = list(values)
     for index, column in enumerate(columns):
-        if column.get("type") == "VECTOR" and isinstance(row[index], list):
+        if column.get("type") != "VECTOR":
+            continue
+        value = row[index]
+        if isinstance(value, dict) and VECTOR_TAG in value:
+            packed = array("f")
+            packed.frombytes(base64.b64decode(value[VECTOR_TAG]))
+            row[index] = packed
+        elif isinstance(value, list):
             # narrow_vector narrows in one C-level pass; on a 20k x 256 recovery
             # the per-element path spent seconds just packing floats
             row[index] = narrow_vector(row[index])
@@ -152,15 +169,24 @@ def parse_vector_text(text, dim=None):
         if not body:
             raw = []
         else:
-            raw = []
-            for part in body.split(","):
-                token = part.strip()
-                if not token:
-                    raise fail("invalid_vector", "empty vector component")
-                try:
-                    raw.append(float(token))
-                except ValueError:
-                    raise fail("invalid_vector", f"vector component {token!r} is not a number") from None
+            # The comma list is JSON-compatible, so the C scanner parses a whole
+            # vector in one call; anything it refuses (empty component, stray
+            # operator, NaN spelling it lets through) is re-run element by
+            # element so the reported error code and message stay specific.
+            try:
+                raw = json.loads("[" + body + "]")
+                if not isinstance(raw, list):
+                    raise ValueError
+            except ValueError:
+                raw = []
+                for part in body.split(","):
+                    token = part.strip()
+                    if not token:
+                        raise fail("invalid_vector", "empty vector component")
+                    try:
+                        raw.append(float(token))
+                    except ValueError:
+                        raise fail("invalid_vector", f"vector component {token!r} is not a number") from None
     values = narrow_vector(raw)
     if dim is not None and len(values) != dim:
         raise fail("dimension_mismatch", f"expected {dim} dimensions, got {len(values)}")
@@ -338,25 +364,35 @@ def tokenize(sql: str):
             quote = char
             index += 1
             buffer = []
+            # Jump straight to the next quote or backslash instead of copying the
+            # literal one character at a time: a loaded INSERT carries a whole
+            # vector per row, so the per-character loop dominated bulk loads.
             while True:
-                if index >= length:
-                    raise fail("syntax_error", "unterminated string literal")
-                current = sql[index]
-                if current == "\\" and index + 1 < length:
-                    nxt = sql[index + 1]
-                    buffer.append(SIMPLE_ESCAPES.get(nxt, nxt))
-                    index += 2
+                stop = sql.find(quote, index)
+                escape = sql.find("\\", index)
+                if escape >= 0 and (stop < 0 or escape < stop):
+                    if escape > index:
+                        buffer.append(sql[index:escape])
+                    if escape + 1 < length:
+                        nxt = sql[escape + 1]
+                        buffer.append(SIMPLE_ESCAPES.get(nxt, nxt))
+                        index = escape + 2
+                    else:
+                        buffer.append("\\")
+                        index = escape + 1
                     continue
-                if current == quote:
-                    if index + 1 < length and sql[index + 1] == quote:
-                        buffer.append(quote)
-                        index += 2
-                        continue
-                    index += 1
-                    break
-                buffer.append(current)
-                index += 1
-            tokens.append(Token("string", "".join(buffer), "".join(buffer)))
+                if stop < 0:
+                    raise fail("syntax_error", "unterminated string literal")
+                if stop > index:
+                    buffer.append(sql[index:stop])
+                if stop + 1 < length and sql[stop + 1] == quote:
+                    buffer.append(quote)
+                    index = stop + 2
+                    continue
+                index = stop + 1
+                break
+            literal = "".join(buffer)
+            tokens.append(Token("string", literal, literal))
             continue
         if char.isdigit() or (char == "." and index + 1 < length and sql[index + 1].isdigit()):
             start = index
