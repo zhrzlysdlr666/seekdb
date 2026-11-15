@@ -597,6 +597,15 @@ int ObCharset::strcmpsp(ObCollationType collation_type,
     }
     return 0 != cmp ? cmp : static_cast<int>(str1_len - str2_len);
   }
+  // utf8mb4_general_ci 直通：只含 ASCII/三字节汉字的串在这里直接算完，
+  // 省掉 is_argument_valid + get_charset + 函数指针间接调用。
+  if (OB_LIKELY(CS_TYPE_UTF8MB4_GENERAL_CI == collation_type)
+      && nullptr != str1 && nullptr != str2 && str1_len >= 0 && str2_len >= 0) {
+    int fast_cmp = 0;
+    if (ob_ci_strnncollsp_fast(str1, str1_len, str2, str2_len, fast_cmp)) {
+      return fast_cmp;
+    }
+  }
   if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
     const ObCharsetInfo *cs = get_charset(collation_type);
     result = cs->coll->strnncollsp(cs,
