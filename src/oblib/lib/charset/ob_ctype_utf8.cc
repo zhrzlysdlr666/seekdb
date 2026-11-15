@@ -372,6 +372,30 @@ int __attribute__ ((noinline))  ob_strnncollsp_utf8mb4_help(
   return 0;
 }
 
+
+// 快速路径判定：字符串是否完全由「三字节汉字」（U+4000..U+9FFF）构成。
+//
+// utf8mb4_general_ci 的排序权重来自 ob_unicase_pages_default 二级表，而该表中
+// 0x40..0x9F 这些页全部为 NULL（无大小写/权重映射），即这些码点的权重等于码点本身；
+// UTF-8 的字节序又与码点序一致。因此当两侧都是这类码点时，逐字节比较与
+// strnncollsp 的权重比较完全等价，可以跳过解码与两级表查找，直接 memcmp。
+// 三字节汉字的字节里不可能出现 0x20（空格），所以尾空格语义也不受影响。
+static inline bool ob_is_all_cjk_3byte(const unsigned char *s, size_t len)
+{
+  if (0 == len || 0 != (len % 3)) {
+    return false;
+  }
+  for (size_t i = 0; i < len; i += 3) {
+    const unsigned char b0 = s[i];
+    if (b0 < 0xE4 || b0 > 0xE9) {
+      return false;
+    }
+    if (0x80 != (s[i + 1] & 0xC0) || 0x80 != (s[i + 2] & 0xC0)) {
+      return false;
+    }
+  }
+  return true;
+}
 static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
                        const unsigned char *src, size_t srclen,
                        const unsigned char *dst, size_t dstlen,
@@ -381,6 +405,18 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   ob_wc_t src_wc = 0, dst_wc = 0;
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
+  // 纯汉字场景的等价快速路径（排序热点，见 ob_is_all_cjk_3byte 注释）
+  if (ob_is_all_cjk_3byte(src, srclen) && ob_is_all_cjk_3byte(dst, dstlen)) {
+    const size_t cmp_len = srclen < dstlen ? srclen : dstlen;
+    const int cmp_res = memcmp(src, dst, cmp_len);
+    if (0 != cmp_res) {
+      return cmp_res < 0 ? -1 : 1;
+    } else if (srclen == dstlen) {
+      return 0;
+    } else {
+      return srclen < dstlen ? -1 : 1;
+    }
+  }
   while ( src < se && dst < te ) {
     int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
     int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
