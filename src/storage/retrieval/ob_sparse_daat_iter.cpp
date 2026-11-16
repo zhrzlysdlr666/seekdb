@@ -434,21 +434,33 @@ int ObSRDaaTIterImpl::project_results(const int64_t count)
   ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
 
   if (eval_ctx->is_vectorized()) {
+    // 投影是纯粹的下标写入：一次性拿到整批 datum 数组，循环里只做一次
+    // 指针拷贝 + 一次 flag 置位。原来每行都要 set_batch_idx() 重算下标、
+    // locate_datum_for_write() 重算地址，并把 evaluated/projected 两个
+    // 与行无关的标记重复设置一遍（8001 行的查询里这是三成以上的行内开销）。
+    ObDatum *id_datums = id_proj_expr->locate_datums_for_update(*eval_ctx, count);
     sql::ObBitVector &id_evaluated_flags = id_proj_expr->get_evaluated_flags(*eval_ctx);
-    for (int64_t i = 0; i < count; ++i) {
-      guard.set_batch_idx(i);
-      ObDatum &id_proj_datum = id_proj_expr->locate_datum_for_write(*eval_ctx);
-      set_datum_func_(id_proj_datum, buffered_domain_ids_[i]);
+    if (OB_ISNULL(id_datums)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
+      set_datum_func_(id_datums[i], buffered_domain_ids_[i]);
       id_evaluated_flags.set(i);
+    }
+    if (OB_SUCC(ret)) {
       id_proj_expr->set_evaluated_projected(*eval_ctx);
     }
-    if (iter_param_->need_project_relevance()) {
+    if (OB_SUCC(ret) && iter_param_->need_project_relevance()) {
+      ObDatum *relevance_datums = relevance_proj_expr->locate_datums_for_update(*eval_ctx, count);
       sql::ObBitVector &relevance_evaluated_flags = relevance_proj_expr->get_evaluated_flags(*eval_ctx);
-      for (int64_t i = 0; i < count; ++i) {
-        guard.set_batch_idx(i);
-        ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
-        relevance_proj_datum.set_double(buffered_relevances_[i]);
+      if (OB_ISNULL(relevance_datums)) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
+        relevance_datums[i].set_double(buffered_relevances_[i]);
         relevance_evaluated_flags.set(i);
+      }
+      if (OB_SUCC(ret)) {
         relevance_proj_expr->set_evaluated_projected(*eval_ctx);
       }
     }
