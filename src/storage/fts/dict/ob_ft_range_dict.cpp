@@ -378,98 +378,38 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
-namespace {
-// 只解码 UTF-8 首字符的码点（1~3 字节）。4 字节（扩展区）返回 -1 交回通用二分，
-// 保证任何情况下都不会比原实现更慢或改变语义。
-inline int32_t utf8_first_cp(const char *p, const int64_t len)
-{
-  if (OB_UNLIKELY(nullptr == p || len <= 0)) {
-    return -1;
-  }
-  const unsigned char c0 = static_cast<unsigned char>(p[0]);
-  if (c0 < 0x80) {
-    return static_cast<int32_t>(c0);
-  }
-  if ((c0 & 0xE0) == 0xC0 && len >= 2) {
-    return ((c0 & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
-  }
-  if ((c0 & 0xF0) == 0xE0 && len >= 3) {
-    return ((c0 & 0x0F) << 12) | ((static_cast<unsigned char>(p[1]) & 0x3F) << 6)
-           | (static_cast<unsigned char>(p[2]) & 0x3F);
-  }
-  return -1;
-}
-} // namespace
-
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  const int64_t n = range_dicts_.size();
-  // Ranges are built in ascending order of their start words, and each range
-  // boundary is aligned to a leading character (build_one_range ends a range
-  // whenever the leading character changes). So ranges sharing a leading
-  // character are contiguous: binary search on the leading code point (an
-  // integer compare, 3 bytes decoded once) lands in that contiguous run, and
-  // only 1~2 full-string compares are needed inside it. This replaces a dozen
-  // full strcmp per dict lookup, which happens once per character position.
-  const int32_t q_cp = (n > 0) ? utf8_first_cp(single_word.ptr(), single_word.length()) : -1;
-  if (q_cp >= 0) {
-    int64_t left = 0;
-    int64_t right = n - 1;
-    int64_t first = n;
-    while (left <= right) {
-      const int64_t mid = left + ((right - left) >> 1);
-      const ObString &sw = range_dicts_[mid].start_.get_word();
-      if (utf8_first_cp(sw.ptr(), sw.length()) < q_cp) {
-        left = mid + 1;
-      } else {
-        first = mid;
-        right = mid - 1;
-      }
-    }
-    for (int64_t i = first; i < n; ++i) {
-      const ObString &sw = range_dicts_[i].start_.get_word();
-      if (utf8_first_cp(sw.ptr(), sw.length()) != q_cp) {
-        break;
-      }
-      if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                            range_dicts_[i].end_.get_word(),
-                            single_word)
-          >= 0) {
-        dict = range_dicts_[i].dict_;
-        found = true;
-        break;
-      }
+  // Ranges are built in ascending order of their start words, so binary search
+  // locates the last range whose start word is <= the search word in O(log n)
+  // instead of scanning every range on each dict lookup (once per character).
+  int64_t left = 0;
+  int64_t right = range_dicts_.size() - 1;
+  int64_t candidate = -1;
+  while (OB_SUCC(ret) && left <= right) {
+    const int64_t mid = left + ((right - left) >> 1);
+    const int cmp = ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                      range_dicts_[mid].start_.get_word(),
+                                      single_word);
+    if (cmp <= 0) {
+      candidate = mid;
+      left = mid + 1;
+    } else {
+      right = mid - 1;
     }
   }
-  if (!found) {
-    // 通用二分（原始实现）：覆盖 4 字节首字符、以及首字组内没有匹配区间的情况
-    int64_t left = 0;
-    int64_t right = n - 1;
-    int64_t candidate = -1;
-    while (left <= right) {
-      const int64_t mid = left + ((right - left) >> 1);
-      const int cmp = ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                                        range_dicts_[mid].start_.get_word(),
-                                        single_word);
-      if (cmp <= 0) {
-        candidate = mid;
-        left = mid + 1;
-      } else {
-        right = mid - 1;
-      }
-    }
-    if (candidate >= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[candidate].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[candidate].dict_;
-      found = true;
-    }
+  if (candidate >= 0
+      && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                           range_dicts_[candidate].end_.get_word(),
+                           single_word)
+             >= 0) {
+    dict = range_dicts_[candidate].dict_;
+    found = true;
   }
   if (!found) {
+    // not found, dis match
     ret = OB_ENTRY_NOT_EXIST;
   }
   return ret;
