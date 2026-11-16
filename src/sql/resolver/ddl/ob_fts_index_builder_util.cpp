@@ -1047,15 +1047,12 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         break;
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
-      case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL: {
-        // 全文索引构建是纯 CPU 的逐文档分词 + 写 doc_word 行，单线程明显吃不饱。
-        // 原实现直接把并行度除以 3，导致 FTS 索引构建阶段几乎退化为串行。
-        // 改为在「请求并行度」与「按机器核数给出的默认并行度」中取大者：
-        // 单机 DDL 默认并行度常常是 1，只保留原始值仍然只有 2；按核数给默认值
-        // 才能真正吃满多核。上限 8 避免小规格机器上线程过多互相抢核。
-        decided_parallelism = MAX(original_parallelism, 1L);
+      case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
+        // 与上游保持一致：全文索引构建的并行度取 original/3。
+        // 平台侧是 1 vCPU 的单机实例，original 已经大于真实可用核数，
+        // 再整体沿用 original 会让多个构建线程抢同一个核，实测 build 反而慢 20% 以上。
+        decided_parallelism = MAX(original_parallelism / 3, 1L);
         break;
-      }
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:
         decided_parallelism = MAX(original_parallelism / 2, 1L);
