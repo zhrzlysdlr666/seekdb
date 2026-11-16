@@ -93,6 +93,10 @@ protected:
   virtual int cache_result(int64_t &count, const ObDatum &id_datum, const double relevance);
   virtual int project_results(const int64_t count);
   int init_merge_heap(const int64_t count);
+  // two dims (= two query terms): a direct two-way merge instead of the merge heap,
+  // one comparison per document, no push/pop/top/rebuild/is_unique_champion churn.
+  int load_next_dim_row(const int64_t dim_idx);
+  int two_dim_union_merge(const int64_t capacity, int64_t &count);
 protected:
   ObIAllocator *iter_allocator_;
   ObSparseRetrievalMergeParam *iter_param_;
@@ -107,6 +111,10 @@ protected:
   int64_t next_round_cnt_;
   void (*set_datum_func_)(ObDatum &, const ObDocIdExt &);
   bool filter_is_bool_of_relevance_;
+  bool two_dim_fast_;
+  bool two_dim_inited_;
+  bool dim_has_cur_[2];
+  double dim_cur_scores_[2];
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSRDaaTIterImpl);
 };
