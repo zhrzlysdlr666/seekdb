@@ -83,8 +83,14 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     next_round_iter_idxes_(),
     next_round_cnt_(0),
     set_datum_func_(nullptr),
-    filter_is_bool_of_relevance_(false)
+    filter_is_bool_of_relevance_(false),
+    two_dim_fast_(false),
+    two_dim_inited_(false)
 {
+  dim_has_cur_[0] = false;
+  dim_has_cur_[1] = false;
+  dim_cur_scores_[0] = 0.0;
+  dim_cur_scores_[1] = 0.0;
 }
 
 int ObSRDaaTIterImpl::init(
@@ -136,6 +142,10 @@ int ObSRDaaTIterImpl::init(
       for (int64_t i = 0; i < dim_iters.count(); ++i) {
         next_round_iter_idxes_[i] = i;
       }
+      two_dim_fast_ = (2 == dim_iters.count());
+      two_dim_inited_ = false;
+      dim_has_cur_[0] = false;
+      dim_has_cur_[1] = false;
     }
 
     if (OB_SUCC(ret)) {
@@ -163,6 +173,10 @@ void ObSRDaaTIterImpl::reset()
   buffered_relevances_.reset();
   next_round_iter_idxes_.reset();
   next_round_cnt_ = 0;
+  two_dim_fast_ = false;
+  two_dim_inited_ = false;
+  dim_has_cur_[0] = false;
+  dim_has_cur_[1] = false;
   input_row_cnt_ = 0;
   output_row_cnt_ = 0;
   is_inited_ = false;
@@ -179,6 +193,9 @@ void ObSRDaaTIterImpl::reuse(const bool switch_tablet)
     for (int64_t i = 0; i < next_round_cnt_; ++i) {
       next_round_iter_idxes_[i] = i;
     }
+    two_dim_inited_ = false;
+    dim_has_cur_[0] = false;
+    dim_has_cur_[1] = false;
   }
   if (OB_NOT_NULL(relevance_collector_)) {
     relevance_collector_->reuse();
@@ -239,7 +256,14 @@ int ObSRDaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
   } else {
     count = 0;
     const int64_t real_capacity = MIN(capacity, iter_param_->max_batch_size_);
-    while (OB_SUCC(ret) && count < real_capacity) {
+    if (two_dim_fast_) {
+      if (OB_FAIL(two_dim_union_merge(real_capacity, count))) {
+        if (OB_UNLIKELY(OB_ITER_END != ret)) {
+          LOG_WARN("fail to do two dim union merge", K(ret));
+        }
+      }
+    }
+    while (!two_dim_fast_ && OB_SUCC(ret) && count < real_capacity) {
       if (OB_FAIL(do_one_merge_round(count))) {
         if (OB_UNLIKELY(OB_ITER_END != ret)) {
         }
@@ -273,6 +297,131 @@ int ObSRDaaTIterImpl::do_one_merge_round(int64_t &count)
   } else if (need_project && OB_FAIL(filter_on_demand(count, relevance, need_project))) {
   } else if (need_project && OB_FAIL(cache_result(count, *id_datum, relevance))) {
     if (OB_ITER_END != ret) {
+    }
+  }
+  return ret;
+}
+
+// Fetch the next row of dim dim_idx; returns OB_ITER_END when that dim is drained.
+int ObSRDaaTIterImpl::load_next_dim_row(const int64_t dim_idx)
+{
+  int ret = OB_SUCCESS;
+  ObISRDaaTDimIter *dim_iter = nullptr;
+  if (OB_UNLIKELY(dim_idx < 0 || dim_idx >= 2) || OB_ISNULL(dim_iters_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid dim idx", K(ret), K(dim_idx));
+  } else if (OB_ISNULL(dim_iter = dim_iters_->at(dim_idx))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("null dim iter", K(ret), K(dim_idx));
+  } else if (OB_FAIL(dim_iter->get_next_row())) {
+  } else if (OB_FAIL(dim_iter->get_curr_score(dim_cur_scores_[dim_idx]))) {
+    LOG_WARN("fail to get curr score", K(ret), K(dim_idx));
+  } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[dim_idx]))) {
+    LOG_WARN("fail to get curr id", K(ret), K(dim_idx));
+  } else {
+    dim_has_cur_[dim_idx] = true;
+  }
+  return ret;
+}
+
+// Two-dimension (two-term) two-way merge: advance in doc id order and group the dims that
+// carry the same id into one document. Exactly the same sequence of collect_one_dim calls
+// and the same single get_result per document as the generic merge heap, only without the
+// per-document push/pop/top/rebuild/is_unique_champion overhead.
+int ObSRDaaTIterImpl::two_dim_union_merge(const int64_t capacity, int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  ObSRMergeItem lhs_item;
+  ObSRMergeItem rhs_item;
+  lhs_item.iter_idx_ = 0;
+  rhs_item.iter_idx_ = 1;
+  if (OB_UNLIKELY(!two_dim_fast_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("two dim fast path not enabled", K(ret));
+  } else if (!two_dim_inited_) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < 2; ++i) {
+      if (OB_FAIL(load_next_dim_row(i))) {
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          dim_has_cur_[i] = false;
+        } else {
+          LOG_WARN("fail to load first row of dim", K(ret), K(i));
+        }
+      }
+    }
+    two_dim_inited_ = true;
+  }
+  while (OB_SUCC(ret) && count < capacity) {
+    int64_t matched = 0;
+    if (!dim_has_cur_[0] && !dim_has_cur_[1]) {
+      ret = OB_ITER_END;
+    } else if (!dim_has_cur_[1]) {
+      matched = 1;
+    } else if (!dim_has_cur_[0]) {
+      matched = 2;
+    } else {
+      int64_t cmp_ret = 0;
+      if (OB_FAIL(merge_cmp_.cmp(lhs_item, rhs_item, cmp_ret))) {
+        LOG_WARN("fail to compare merge item", K(ret));
+      } else if (cmp_ret < 0) {
+        matched = 1;
+      } else if (cmp_ret > 0) {
+        matched = 2;
+      } else {
+        matched = 3;
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+      break;
+    }
+    bool need_project = false;
+    for (int64_t i = 0; OB_SUCC(ret) && i < 2; ++i) {
+      if (0 != (matched & (1L << i))) {
+        double score = dim_cur_scores_[i];
+        if (OB_NOT_NULL(iter_param_->dim_weights_)) {
+          score = score * iter_param_->field_boost_ * iter_param_->dim_weights_->at(i);
+        }
+        if (OB_FAIL(relevance_collector_->collect_one_dim(i, score))) {
+          LOG_WARN("fail to collect dim", K(ret), K(i));
+        }
+      }
+    }
+    double relevance = 0.0;
+    bool is_valid = false;
+    if (OB_FAIL(ret)) {
+      break;
+    } else if (OB_FAIL(relevance_collector_->get_result(relevance, is_valid))) {
+      LOG_WARN("fail to get relevance result", K(ret));
+    } else if (!is_valid) {
+      // same as the generic path: an invalid document is not projected
+    } else if (OB_FAIL(filter_on_demand(count, relevance, need_project))) {
+      LOG_WARN("fail to filter on demand", K(ret));
+    } else if (need_project) {
+      const ObDatum *id_datum = iter_domain_ids_[0 == (matched & 1) ? 1 : 0];
+      if (OB_ISNULL(id_datum)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(cache_result(count, *id_datum, relevance))) {
+        if (OB_UNLIKELY(OB_ITER_END != ret)) {
+          LOG_WARN("fail to cache result", K(ret));
+        }
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+      break;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < 2; ++i) {
+      if (0 != (matched & (1L << i))) {
+        if (OB_FAIL(load_next_dim_row(i))) {
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+            dim_has_cur_[i] = false;
+          } else {
+            LOG_WARN("fail to load next row of dim", K(ret), K(i));
+          }
+        }
+      }
     }
   }
   return ret;
