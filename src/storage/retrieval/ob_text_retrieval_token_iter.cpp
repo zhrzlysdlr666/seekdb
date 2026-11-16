@@ -472,12 +472,11 @@ void ObTextRetrievalDaaTTokenIter::reset()
 int ObTextRetrievalDaaTTokenIter::get_next_row() {
   int ret = OB_SUCCESS;
   bool need_load = false;
+  // ob_daat_tok_batch_always: 非向量化（COUNT(*) 走标量聚合）时原来逐行进
+  // storage 取一行（get_next_row），每次都要走一遍 micro block 解码 + 多路归并；
+  // 这里统一走批量取数（get_next_batch(max_batch_size_)），把解码摊到一批上。
   if (OB_LIKELY((++cur_idx_) < count_)) {
-  } else if (!eval_ctx_->is_vectorized() && (OB_FAIL(token_iter_->get_next_row()))) {
-    if (OB_UNLIKELY(OB_ITER_END != ret)) {
-    }
-  } else if (!eval_ctx_->is_vectorized() && FALSE_IT(count_ = 1)) {
-  } else if (eval_ctx_->is_vectorized() && OB_FAIL(token_iter_->get_next_batch(max_batch_size_, count_))) {
+  } else if (OB_FAIL(token_iter_->get_next_batch(max_batch_size_, count_))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     } else if (count_ != 0) {
       ret = OB_SUCCESS;
