@@ -153,8 +153,6 @@ ob_wc_t ObUnicodeBlockUtils::get_unicode_from_u8(const char *input, const uint8_
 #define OB_IK_GET_NUMBER_UNICODE(str) get_unicode_from_u8(str, sizeof(str))
 bool ObUnicodeBlockUtils::is_unicode_cn_number(ob_wc_t unicode)
 {
-  // 中文数字全部落在 CJK 统一表意文字区（0x4E00-0x9FFF），先用一次范围判断
-  // 挡掉绝大多数码点，避免下面 30 项表的线性扫描（每个汉字分词时都会调用）。
   if (unicode < 0x4E00 || unicode > 0x9FFF) {
     return false;
   }
