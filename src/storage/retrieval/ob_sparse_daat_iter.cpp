@@ -82,7 +82,8 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     buffered_relevances_(),
     next_round_iter_idxes_(),
     next_round_cnt_(0),
-    set_datum_func_(nullptr)
+    set_datum_func_(nullptr),
+    filter_is_bool_of_relevance_(false)
 {
 }
 
@@ -125,6 +126,12 @@ int ObSRDaaTIterImpl::init(
     } else if (OB_FAIL(buffered_relevances_.prepare_allocate(max_batch_size))) {
     } else if (OB_FAIL(merge_cmp_.init(iter_param_->id_proj_expr_->datum_meta_, &iter_domain_ids_))) {
     } else if (OB_FAIL(init_merge_heap(dim_iters_->count()))) {
+    } else if (FALSE_IT(filter_is_bool_of_relevance_ = (
+        nullptr != iter_param_->filter_expr_
+        && nullptr != iter_param_->relevance_proj_expr_
+        && T_OP_BOOL == iter_param_->filter_expr_->type_
+        && 1 == iter_param_->filter_expr_->arg_cnt_
+        && iter_param_->filter_expr_->args_[0] == iter_param_->relevance_proj_expr_))) {
     } else {
       for (int64_t i = 0; i < dim_iters.count(); ++i) {
         next_round_iter_idxes_[i] = i;
@@ -356,6 +363,17 @@ int ObSRDaaTIterImpl::filter_on_demand(const int64_t count, const double relevan
 
   if (!iter_param_->need_filter()) {
     need_project = true;
+  } else if (filter_is_bool_of_relevance_) {
+    // 过滤表达式就是 BOOL(relevance)（BIT 语义：非 0 即真），
+    // 直接由已算好的 relevance 得出结论，省掉逐行的 datum 写入、
+    // evaluated flag 清理与表达式求值（这三步在每行都要走一遍虚函数）。
+    need_project = (0.0 != relevance);
+    if (need_project && iter_param_->need_project_relevance()) {
+      guard.set_batch_idx(eval_ctx->is_vectorized() ? count : 0);
+      ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
+      relevance_proj_datum.set_double(relevance);
+      relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+    }
   } else if (eval_ctx->is_vectorized()) {
     if (OB_UNLIKELY(count >= eval_ctx->max_batch_size_)) {
       ret = OB_ERR_UNEXPECTED;
